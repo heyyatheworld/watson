@@ -1,9 +1,10 @@
-"""Discord bot that records voice channel audio and transcribes it with Whisper."""
+"""Discord bot that records voice channel audio and transcribes it with faster-whisper."""
 
 import asyncio
+import gc
 import logging
 import os
-import gc
+import tempfile
 import psutil
 import discord
 from discord.ext import commands
@@ -11,6 +12,12 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 
 load_dotenv()
+
+# Temporary directory for WAV recordings and transcript files (avoids cluttering project dir)
+_watson_temp_dir = os.getenv("WATSON_TEMP_DIR")
+if not _watson_temp_dir:
+    _watson_temp_dir = os.path.join(tempfile.gettempdir(), "watson")
+os.makedirs(_watson_temp_dir, exist_ok=True)
 
 # Logging: level from env, optional file output
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -54,6 +61,7 @@ _log_memory("after_opus")
 logger.info("Loading Whisper model (turbo)...")
 model = WhisperModel("turbo", device="cpu", compute_type="int8")
 logger.info("Whisper ready")
+logger.info("Temp dir for recordings: %s", _watson_temp_dir)
 _log_memory("after_whisper_load")
 
 intents = discord.Intents.default()
@@ -200,7 +208,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
     try:
         for user_id, audio in sink.audio_data.items():
-            file_name = f"temp_{guild_id}_{user_id}.wav"
+            file_name = os.path.join(_watson_temp_dir, f"temp_{guild_id}_{user_id}.wav")
             temp_files.append(file_name)
 
             audio.file.seek(0)
@@ -256,17 +264,24 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         header = f"📋 **TRANSCRIPT ({channel.guild.name})**\n\n"
         total_len = len(header) + len(raw_transcript)
 
-        if total_len > 2000:
-            file_path = f"transcript_{guild_id}.txt"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(raw_transcript.replace("**", ""))
-            logger.info("Transcript too long (%d chars), sending as file %s (guild %s)", total_len, file_path, guild_id)
-            await channel.send(header + "See attachment:", file=discord.File(file_path))
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        else:
-            logger.info("Sending transcript (%d chars) to channel (guild %s)", total_len, guild_id)
-            await status_msg.edit(content=header + raw_transcript)
+        try:
+            if total_len > 2000:
+                file_path = os.path.join(_watson_temp_dir, f"transcript_{guild_id}.txt")
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(raw_transcript.replace("**", ""))
+                logger.info("Transcript too long (%d chars), sending as file %s (guild %s)", total_len, file_path, guild_id)
+                await channel.send(header + "See attachment:", file=discord.File(file_path))
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            else:
+                logger.info("Sending transcript (%d chars) to channel (guild %s)", total_len, guild_id)
+                await status_msg.edit(content=header + raw_transcript)
+        except discord.DiscordException as e:
+            logger.exception("Failed to send transcript to channel (guild %s): %s", guild_id, e)
+            try:
+                await channel.send("⚠️ Transcript ready but failed to post. Check bot permissions and logs.")
+            except discord.DiscordException:
+                pass
 
     finally:
         transcribing_guilds.discard(guild_id)

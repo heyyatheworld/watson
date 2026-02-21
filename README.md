@@ -1,16 +1,17 @@
 # Watson
 
-A Discord bot that records voice channel audio and transcribes it with [OpenAI Whisper](https://github.com/openai/whisper). It posts timestamped transcripts in the channel and stops recording automatically when everyone leaves the voice channel.
+A Discord bot that records voice channel audio and transcribes it with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). It posts timestamped transcripts in the channel and stops recording automatically when everyone leaves the voice channel.
 
 **[Add Watson to your server](https://discord.com/oauth2/authorize?client_id=1474417737659846727&permissions=3147776&scope=bot)**
 
 ## Features
 
 - **Voice recording** — Joins a voice channel and records participants (WAV).
-- **Transcription** — Converts speech to text via Whisper (turbo model); transcription runs in a thread so the bot stays responsive.
+- **Transcription** — Converts speech to text via faster-whisper (turbo model, CPU/int8); transcription runs in a thread so the bot stays responsive.
 - **Timestamped transcript** — Posts a transcript with `[MM:SS] User: text` in the channel, or sends it as a file if longer than Discord’s limit.
 - **Auto-stop** — When the last human leaves the voice channel, recording stops and the transcript is processed.
 - **Logging** — Configurable log level and optional file output via environment variables.
+- **Memory diagnostics** — Process RSS logged at key stages (after load, transcription start/done); optional `LOG_FILE` for persistence.
 
 ## Prerequisites
 
@@ -43,7 +44,7 @@ Watson will appear in your server’s member list. You can then use `!join`, `!r
    pip install -r requirements.txt
    ```
 
-   Main dependencies: `py-cord`, `openai-whisper`, `python-dotenv`, `torch`.
+   Main dependencies: `py-cord`, `faster-whisper`, `python-dotenv`, `psutil`.
 
 3. **Configure environment**
 
@@ -81,13 +82,19 @@ Watson will appear in your server’s member list. You can then use `!join`, `!r
 
 3. After `!stop`, the bot processes the audio with Whisper and posts the transcript. If the transcript is longer than 2000 characters, it is sent as `transcript_<guild_id>.txt`.
 
-**Note:** Transcription is set to `language="russian"` in the code. You can change it in `main.py` in the `model.transcribe(...)` call.
+**Note:** Transcription uses `language="ru"`. You can change it in `main.py` in the `model.transcribe(...)` call. Model and device are set in code (`WhisperModel("turbo", device="cpu", compute_type="int8")`); use GPU by changing `device="cuda"` if available.
+
+## Troubleshooting
+
+- **High memory usage** — The bot logs RSS at key stages (`LOG_LEVEL=INFO`). After each session it runs `gc.collect()`. If you run on a small VPS, keep `device="cpu"` and `compute_type="int8"`.
+- **Slow transcription** — On a machine with a CUDA GPU, change in `main.py`: `WhisperModel("turbo", device="cuda", compute_type="float16")` (and install CUDA-compatible dependencies).
+- **Bot doesn’t respond** — Ensure **Message Content Intent** is enabled in the Developer Portal (Bot → Privileged Gateway Intents).
 
 ## Project structure
 
 ```
 Watson/
-├── main.py           # Bot, voice recording, Whisper transcription
+├── main.py           # Bot, voice recording, faster-whisper transcription
 ├── .env              # DISCORD_TOKEN, optional LOG_LEVEL, LOG_FILE (not committed)
 ├── .env.example      # Template for .env
 ├── requirements.txt  # Python dependencies
