@@ -1,0 +1,13 @@
+services:
+  watson-bot:
+    build: .
+    restart: always
+    env_file: .env
+    environment:
+      - WATSON_TEMP_DIR=/app/temp
+    volumes:
+      - ./temp:/app/temp
+      - whisper_model_cache:/root/.cache/huggingface
+
+volumes:
+  whisper_model_cache:
