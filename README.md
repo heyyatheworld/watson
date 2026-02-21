@@ -90,11 +90,21 @@ Watson will appear in your server’s member list. You can then use `!join`, `!r
 - **Slow transcription** — On a machine with a CUDA GPU, change in `main.py`: `WhisperModel("turbo", device="cuda", compute_type="float16")` (and install CUDA-compatible dependencies).
 - **Bot doesn’t respond** — Ensure **Message Content Intent** is enabled in the Developer Portal (Bot → Privileged Gateway Intents).
 
+## Testing
+
+Run the test suite (requires pytest; Discord and faster-whisper are mocked so no token or model is needed):
+
+```bash
+pytest tests/ -v
+```
+
 ## Project structure
 
 ```
 Watson/
 ├── main.py           # Bot, voice recording, faster-whisper transcription
+├── tests/            # Basic tests (helpers, config, command mocks)
+├── pytest.ini        # Pytest config
 ├── .env              # DISCORD_TOKEN, optional LOG_LEVEL, LOG_FILE (not committed)
 ├── .env.example      # Template for .env
 ├── requirements.txt  # Python dependencies

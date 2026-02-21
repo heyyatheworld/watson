@@ -47,6 +47,15 @@ def _log_memory(stage: str):
     if mb is not None:
         logger.info("Memory [%s]: %.1f MB RSS", stage, mb)
 
+
+def build_transcript_lines(phrases: list[dict]) -> str:
+    """Build raw transcript text from list of {time, user, text}; used by once_done."""
+    lines = []
+    for p in phrases:
+        m, s = divmod(int(p["time"]), 60)
+        lines.append(f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}\n")
+    return "".join(lines)
+
 logging.getLogger('discord.voicereader').setLevel(logging.ERROR)
 logging.getLogger('discord.voicereader').propagate = False
 
@@ -274,10 +283,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         all_phrases.sort(key=lambda x: x['time'])
         logger.debug("Collected %d phrases", len(all_phrases))
 
-        raw_transcript = ""
-        for p in all_phrases:
-            m, s = divmod(int(p['time']), 60)
-            raw_transcript += f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}\n"
+        raw_transcript = build_transcript_lines(all_phrases)
 
         if not raw_transcript:
             logger.info("No speech recognized for guild %s", guild_id)
