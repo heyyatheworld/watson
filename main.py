@@ -38,6 +38,29 @@ async def on_ready():
     print(f'Connected to {len(bot.guilds)} guilds.')
     print('----------------------')
 
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Надежная автоматическая остановка записи."""
+    # Нас интересует только когда кто-то уходит (before.channel)
+    if before.channel is not None:
+        voice_client = member.guild.voice_client
+        
+        # Если бот в канале, где произошло движение
+        if voice_client and voice_client.channel == before.channel:
+            # Считаем людей (исключая ботов)
+            human_members = [m for m in before.channel.members if not m.bot]
+            
+            if len(human_members) == 0:
+                if voice_client.recording:
+                    print(f"🤫 Канал {before.channel.name} пуст. Завершаю сессию...")
+                    
+                    # Принудительно вызываем остановку
+                    voice_client.stop_recording()
+                    
+                    # Даем небольшую паузу, чтобы once_done успел подхватить данные 
+                    # до того, как бот выйдет из канала (если планируется выход)
+                    await asyncio.sleep(1)
+
 # --- КОМАНДЫ ---
 
 @bot.command()
