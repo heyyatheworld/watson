@@ -24,6 +24,9 @@ if log_file:
 logger = logging.getLogger(__name__)
 logging.getLogger("discord").setLevel(logging.WARNING)
 
+logging.getLogger('discord.voicereader').setLevel(logging.ERROR)
+logging.getLogger('discord.voicereader').propagate = False
+
 # Load Opus before creating the bot (required on macOS Homebrew)
 try:
     discord.opus.load_opus('/opt/homebrew/lib/libopus.dylib')
