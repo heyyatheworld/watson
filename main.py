@@ -52,7 +52,7 @@ except Exception as e:
 _log_memory("after_opus")
 
 logger.info("Loading Whisper model (turbo)...")
-model = whisper.load_model("turbo")
+model = whisper.load_model("turbo", device="cpu", compute_type="int8")
 logger.info("Whisper ready")
 _log_memory("after_whisper_load")
 
