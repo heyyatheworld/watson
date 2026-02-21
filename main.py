@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import os
-
+import gc
+import psutil
 import discord
 import whisper
 from discord.ext import commands
@@ -24,6 +25,21 @@ if log_file:
 logger = logging.getLogger(__name__)
 logging.getLogger("discord").setLevel(logging.WARNING)
 
+
+def _memory_mb():
+    """Return current process RSS in MB, or None if unavailable."""
+    try:
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _log_memory(stage: str):
+    """Log diagnostic memory usage at the given stage."""
+    mb = _memory_mb()
+    if mb is not None:
+        logger.info("Memory [%s]: %.1f MB RSS", stage, mb)
+
 logging.getLogger('discord.voicereader').setLevel(logging.ERROR)
 logging.getLogger('discord.voicereader').propagate = False
 
@@ -33,10 +49,12 @@ try:
     logger.info("Opus loaded")
 except Exception as e:
     logger.info("Opus fallback: %s", e)
+_log_memory("after_opus")
 
 logger.info("Loading Whisper model (turbo)...")
 model = whisper.load_model("turbo")
 logger.info("Whisper ready")
+_log_memory("after_whisper_load")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -52,6 +70,7 @@ transcribing_guilds = set()
 async def on_ready():
     """Log bot name, ID, and guild count when the bot comes online."""
     logger.info("Watson online — %s (ID: %s), guilds: %d", bot.user.name, bot.user.id, len(bot.guilds))
+    _log_memory("on_ready")
     for guild in bot.guilds:
         logger.info("  Guild: %s (ID: %s)", guild.name, guild.id)
 
@@ -172,6 +191,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
     transcribing_guilds.add(guild_id)
     logger.debug("Added guild %s to transcribing_guilds", guild_id)
+    _log_memory("transcription_start")
     status_msg = await channel.send("⚙️ **Watson is processing audio...**")
 
     all_phrases = []
@@ -204,6 +224,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                 )
                 num_segments = len(result.get("segments", []))
                 logger.info("Transcribed user %s: %d segments", user_id, num_segments)
+                _log_memory("after_transcribe_user_%s" % user_id)
 
                 user_obj = bot.get_user(user_id)
                 username = user_obj.display_name if user_obj else f"User {user_id}"
@@ -253,6 +274,9 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         for f in temp_files:
             if os.path.exists(f):
                 os.remove(f)
+        del sink
+        gc.collect()
+        _log_memory("transcription_done")
         logger.info("Session finished for guild %s (%s), cleaned %d temp files", guild_id, guild_name, len(temp_files))
 
 
