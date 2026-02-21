@@ -1,163 +1,143 @@
-"""Discord bot that records voice channel audio and transcribes it with Whisper."""
-
 import os
-import time
-import httpx
 import asyncio
 import discord
-import requests
-from discord.ext import commands
 import whisper
-
+from discord.ext import commands
 from dotenv import load_dotenv
+
+# 1. Настройка окружения
 load_dotenv()
 
-# Load Opus before creating the bot (required on macOS Homebrew)
+# Загрузка Opus (необходимо для некоторых серверных ОС и macOS)
 try:
+    # Если на сервере Linux, путь может не требоваться или быть другим
+    # discord.opus.load_opus('/usr/lib/libopus.so') 
     discord.opus.load_opus('/opt/homebrew/lib/libopus.dylib')
     print("✅ Opus loaded")
 except Exception as e:
-    print(f"❌ Opus load error: {e}")
+    print(f"ℹ️ Opus load info (standard path used): {e}")
 
-print("Loading Whisper model...")
+# 2. Инициализация Whisper
+print("Loading Whisper model (turbo)...")
+# На сервере без GPU автоматически выберет CPU. 
+# Если есть GPU NVIDIA, Whisper сам задействует CUDA.
 model = whisper.load_model("turbo")
-print("Whisper ready.")
+print("✅ Whisper ready.")
 
+# 3. Конфигурация бота
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-connections = {}
-start_times = {}
-
 @bot.event
 async def on_ready():
-    """Log bot name, ID, and connected guilds when the bot comes online."""
     print(f'--- Watson Online ---')
     print(f'Bot: {bot.user.name} (ID: {bot.user.id})')
-    print('Guilds:')
-    for guild in bot.guilds:
-        print(f'  - {guild.name} (ID: {guild.id})')
+    print(f'Connected to {len(bot.guilds)} guilds.')
     print('----------------------')
+
+# --- КОМАНДЫ ---
 
 @bot.command()
 async def check(ctx):
-    """Reply with connection status and bot permissions in the current channel."""
-    permissions = ctx.channel.permissions_for(ctx.me)
-    status_message = (
-        "✅ **Connection OK**\n"
-        f"I see you, {ctx.author.mention}.\n\n"
-        "**Permissions in this channel:**\n"
-        f"- Send messages: {'✅' if permissions.send_messages else '❌'}\n"
-        f"- Read history: {'✅' if permissions.read_message_history else '❌'}\n"
-        f"- Administrator: {'👑 Yes' if permissions.administrator else 'No'}"
+    """Проверка прав бота в текущем канале."""
+    perms = ctx.channel.permissions_for(ctx.me)
+    
+    status = [
+        f"✅ **Подключение:** Стабильное",
+        f"🎤 **Голосовой канал:** {'✅' if ctx.author.voice else '❌ (вы не в канале)'}",
+        f"📝 **Отправка сообщений:** {'✅' if perms.send_messages else '❌'}",
+        f"📎 **Отправка файлов:** {'✅' if perms.attach_files else '❌'}",
+        f"📜 **История сообщений:** {'✅' if perms.read_message_history else '❌'}",
+        f"🎙 **Право записи (Speak):** {'✅' if perms.speak else '❌'}"
+    ]
+    
+    embed = discord.Embed(
+        title="Диагностика системы Ватсон",
+        description="\n".join(status),
+        color=discord.Color.blue() if perms.attach_files else discord.Color.red()
     )
-    await ctx.send(status_message)
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def join(ctx):
-    """Join the voice channel the author is in."""
     if ctx.author.voice:
         channel = ctx.author.voice.channel
         await channel.connect()
-        await ctx.send(f"🎩 Joined `{channel.name}`. Ready to listen.")
+        await ctx.send(f"🎩 Зашел в `{channel.name}`. Готов слушать.")
     else:
-        await ctx.send("You need to be in a voice channel first.")
-
-@bot.command()
-async def leave(ctx):
-    """Leave the current voice channel."""
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        await ctx.send("Left the channel.")
-    else:
-        await ctx.send("I'm not in a voice channel.")
+        await ctx.send("Сначала зайдите в голосовой канал!")
 
 @bot.command()
 async def record(ctx):
-    """Start recording and transcribing voice in the current channel."""
+    """Начать запись."""
     voice = ctx.voice_client
     if not voice:
-        await ctx.send("Join first with !join")
+        await ctx.send("Используйте !join сначала.")
         return
 
-    start_times[ctx.guild.id] = time.time()
-    await ctx.send("⏺ **Recording and transcription started.** Speak in turn...")
+    await ctx.send("⏺ **Запись и транскрибация запущены.** Говорите...")
+    # WaveSink сохраняет аудио в оперативной памяти до момента остановки
     voice.start_recording(discord.sinks.WaveSink(), once_done, ctx.channel)
 
 @bot.command()
 async def stop(ctx):
-    """Stop the current recording."""
+    """Остановить запись."""
     voice = ctx.voice_client
     if voice and voice.recording:
-        try:
-            voice.stop_recording()
-            if ctx.guild.id in connections:
-                del connections[ctx.guild.id]
-        except Exception as e:
-            await ctx.send(f"⚠️ Stop error: {e}")
+        voice.stop_recording()
+        await ctx.send("⏹ Запись остановлена. Начинаю сборку текста...")
     else:
-        await ctx.send("I'm not recording right now.")
+        await ctx.send("Я сейчас ничего не записываю.")
 
-async def ask_ollama(prompt):
-    """Асинхронный запрос к Ollama через httpx."""
-    url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": "llama3:latest",
-        "prompt": prompt,
-        "stream": False
-    }
-    # Используем бесконечный таймаут, так как анализ длинного текста может занять время
-    async with httpx.AsyncClient(timeout=None) as client:
-        try:
-            response = await client.post(url, json=payload)
-            if response.status_code == 200:
-                return response.json().get('response', '')
-            return f"⚠️ Ошибка Ollama: {response.status_code}"
-        except Exception as e:
-            return f"⚠️ Ошибка подключения к Ollama: {e}"
+@bot.command()
+async def leave(ctx):
+    """Выйти из канала."""
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        await ctx.send("До встречи!")
+    else:
+        await ctx.send("Я не в голосовом канале.")
 
 async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
-    """Безопасная обработка аудио для нескольких серверов одновременно."""
+    """Обработка результатов записи."""
     if not sink.audio_data:
-        await channel.send("📭 Запись пуста или была тишина.")
+        await channel.send("📭 Запись пуста (тишина).")
         return
 
     guild_id = channel.guild.id
-    guild_name = channel.guild.name
-    status_msg = await channel.send(f"⚙️ **Ватсон (сервер: {guild_name}) обрабатывает аудио...**")
+    status_msg = await channel.send("⚙️ **Ватсон обрабатывает аудио...**")
     
-    print(f"🚀 Начата обработка для сервера: {guild_name} (ID: {guild_id})")
-
     all_phrases = []
-    junk_phrases = ["Редактор", "Субтитры", "А.Семкин", "Thanks for watching", "продолжение следует"]
-
-    # Собираем список файлов для текущей сессии, чтобы потом их удалить
-    session_files = []
+    # Список фраз, которые Whisper часто выдумывает в тишине
+    junk_phrases = ["редактор", "субтитры", "а.семкин", "продолжение следует", "спасибо за просмотр"]
+    
+    temp_files = []
 
     try:
+        # Обработка аудио каждого участника
         for user_id, audio in sink.audio_data.items():
-            # Уникальное имя файла: ID сервера + ID пользователя
+            # Уникальное имя файла для предотвращения конфликтов между серверами
             file_name = f"temp_{guild_id}_{user_id}.wav"
-            session_files.append(file_name)
+            temp_files.append(file_name)
             
             audio.file.seek(0)
             data = audio.file.read()
 
-            if len(data) < 2000:
+            if len(data) < 2000: # Пропускаем слишком короткие фрагменты
                 continue
 
             with open(file_name, "wb") as f:
                 f.write(data)
 
             try:
-                # Асинхронный запуск Whisper
+                # Транскрибация в отдельном потоке, чтобы не блокировать бота
                 result = await asyncio.to_thread(
-                    model.transcribe,
-                    file_name,
-                    language="russian",
+                    model.transcribe, 
+                    file_name, 
+                    language="russian", 
                     fp16=False
                 )
 
@@ -166,67 +146,52 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
                 for segment in result['segments']:
                     text = segment['text'].strip()
-                    if not any(junk.lower() in text.lower() for junk in junk_phrases):
+                    # Фильтрация мусора и коротких артефактов
+                    if not any(junk in text.lower() for junk in junk_phrases) and len(text) > 1:
                         all_phrases.append({
                             'time': segment['start'],
                             'user': username,
                             'text': text
                         })
             except Exception as e:
-                print(f"❌ Ошибка Whisper ({guild_name}): {e}")
+                print(f"❌ Ошибка Whisper для {user_id}: {e}")
 
-        # Сортировка и сборка текста
+        # Сортировка всех реплик по времени начала
         all_phrases.sort(key=lambda x: x['time'])
-        raw_transcript_lines = []
+        
+        raw_transcript = ""
         for p in all_phrases:
             m, s = divmod(int(p['time']), 60)
-            raw_transcript_lines.append(f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}")
+            raw_transcript += f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}\n"
 
-        raw_text = "\n".join(raw_transcript_lines)
-
-        if not raw_text:
-            await status_msg.edit(content="😶 Не удалось разобрать слова в этом канале.")
+        if not raw_transcript:
+            await status_msg.edit(content="😶 Не удалось распознать речь.")
             return
 
-        # Отправка стенограммы
-        if len(raw_text) > 1900:
-            with open(f"transcript_{guild_id}.txt", "w", encoding="utf-8") as f:
-                f.write(raw_text.replace("**", ""))
-            await channel.send("📋 Стенограмма:", file=discord.File(f"transcript_{guild_id}.txt"))
-            if os.path.exists(f"transcript_{guild_id}.txt"): os.remove(f"transcript_{guild_id}.txt")
+        # Отправка результата в Discord
+        header = f"📋 **СТЕНОГРАММА ({channel.guild.name})**\n\n"
+        
+        if len(header + raw_transcript) > 2000:
+            file_path = f"transcript_{guild_id}.txt"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(raw_transcript.replace("**", "")) # Убираем жирный шрифт для файла
+            
+            await channel.send(header + "Результат во вложении:", file=discord.File(file_path))
+            if os.path.exists(file_path):
+                os.remove(file_path)
         else:
-            await status_msg.edit(content=f"📋 **СТЕНОГРАММА ({guild_name})**\n\n{raw_text}")
-
-        # Анализ через Ollama
-        await channel.send("🧠 **Ватсон анализирует контекст...**")
-        
-        prompt = f"""
-        Context: Discord server '{guild_name}'.
-        Task: Summarize and find Action Items in Russian.
-        Transcript:
-        {raw_text}
-        """
-        
-        ai_analysis = await ask_ollama(prompt)
-        
-        # Отправка анализа
-        if len(ai_analysis) > 1900:
-            with open(f"analysis_{guild_id}.txt", "w", encoding="utf-8") as f:
-                f.write(ai_analysis)
-            await channel.send("📝 Анализ:", file=discord.File(f"analysis_{guild_id}.txt"))
-            if os.path.exists(f"analysis_{guild_id}.txt"): os.remove(f"analysis_{guild_id}.txt")
-        else:
-            await channel.send(f"📝 **АНАЛИЗ ({guild_name}):**\n\n{ai_analysis}")
+            await status_msg.edit(content=header + raw_transcript)
 
     finally:
-        # Гарантированное удаление временных аудиофайлов
-        for f_path in session_files:
-            if os.path.exists(f_path):
-                os.remove(f_path)
-        print(f"✅ Обработка для {guild_name} завершена, файлы удалены.")
+        # Гарантированная очистка временных аудиофайлов
+        for f in temp_files:
+            if os.path.exists(f):
+                os.remove(f)
+        print(f"✅ Сессия завершена для сервера {guild_id}")
 
-    
+# Запуск
 token = os.getenv("DISCORD_TOKEN")
 if not token:
-    raise SystemExit("Set DISCORD_TOKEN in .env (see .env.example)")
-bot.run(token)
+    print("❌ Ошибка: DISCORD_TOKEN не найден в .env")
+else:
+    bot.run(token)
