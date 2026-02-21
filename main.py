@@ -41,6 +41,9 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# Guilds currently running Whisper transcription; no new recording until done
+transcribing_guilds = set()
+
 
 @bot.event
 async def on_ready():
@@ -102,6 +105,8 @@ async def record(ctx):
         return await ctx.send("Invite me with !join first.")
     if voice.recording:
         return await ctx.send("⚠️ Recording is already in progress.")
+    if ctx.guild.id in transcribing_guilds:
+        return await ctx.send("⚠️ Previous recording is still being transcribed. Wait for it to finish.")
 
     await ctx.send("⏺ **Recording started.**")
     voice.start_recording(discord.sinks.WaveSink(), once_done, ctx.channel)
@@ -135,6 +140,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         return
 
     guild_id = channel.guild.id
+    transcribing_guilds.add(guild_id)
     status_msg = await channel.send("⚙️ **Watson is processing audio...**")
 
     all_phrases = []
@@ -202,6 +208,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             await status_msg.edit(content=header + raw_transcript)
 
     finally:
+        transcribing_guilds.discard(guild_id)
         for f in temp_files:
             if os.path.exists(f):
                 os.remove(f)
