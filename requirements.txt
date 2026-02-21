@@ -6,7 +6,6 @@ audioop-lts==0.2.2
 certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
-discord==2.3.2
 dotenv==0.9.9
 filelock==3.24.3
 frozenlist==1.8.0
