@@ -20,7 +20,7 @@ multidict==6.7.1
 networkx==3.6.1
 numba==0.64.0
 numpy==2.4.2
-openai-whisper==20250625
+faster-whisper>=1.0.0
 propcache==0.4.1
 psutil>=5.9.0
 py-cord==2.7.1

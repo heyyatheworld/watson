@@ -6,9 +6,9 @@ import os
 import gc
 import psutil
 import discord
-import whisper
 from discord.ext import commands
 from dotenv import load_dotenv
+from faster_whisper import WhisperModel
 
 load_dotenv()
 
@@ -52,7 +52,7 @@ except Exception as e:
 _log_memory("after_opus")
 
 logger.info("Loading Whisper model (turbo)...")
-model = whisper.load_model("turbo", device="cpu", compute_type="int8")
+model = WhisperModel("turbo", device="cpu", compute_type="int8")
 logger.info("Whisper ready")
 _log_memory("after_whisper_load")
 
@@ -216,27 +216,27 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             logger.debug("Saved %s (%d bytes), transcribing user %s", file_name, data_len, user_id)
 
             try:
-                result = await asyncio.to_thread(
-                    model.transcribe,
-                    file_name,
-                    language="russian",
-                    fp16=False
-                )
-                num_segments = len(result.get("segments", []))
+                def _transcribe(path: str):
+                    segments_iter, _ = model.transcribe(path, beam_size=5, language="ru")
+                    return list(segments_iter)
+
+                segments_list = await asyncio.to_thread(_transcribe, file_name)
+                num_segments = len(segments_list)
                 logger.info("Transcribed user %s: %d segments", user_id, num_segments)
                 _log_memory("after_transcribe_user_%s" % user_id)
 
                 user_obj = bot.get_user(user_id)
                 username = user_obj.display_name if user_obj else f"User {user_id}"
 
-                for segment in result['segments']:
-                    text = segment['text'].strip()
+                for seg in segments_list:
+                    text = (seg.text or "").strip()
                     if not any(junk in text.lower() for junk in junk_phrases) and len(text) > 1:
                         all_phrases.append({
-                            'time': segment['start'],
+                            'time': seg.start,
                             'user': username,
                             'text': text
                         })
+                del segments_list
             except Exception as e:
                 logger.exception("Whisper error for user %s: %s", user_id, e)
 
