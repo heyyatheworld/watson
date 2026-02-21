@@ -61,8 +61,6 @@ async def on_voice_state_update(member, before, after):
                     # до того, как бот выйдет из канала (если планируется выход)
                     await asyncio.sleep(1)
 
-# --- КОМАНДЫ ---
-
 @bot.command()
 async def check(ctx):
     """Проверка прав бота в текущем канале."""
@@ -86,23 +84,25 @@ async def check(ctx):
 
 @bot.command()
 async def join(ctx):
+    if ctx.voice_client:
+        return await ctx.send("Я уже в канале! 🎙")
     if ctx.author.voice:
-        channel = ctx.author.voice.channel
-        await channel.connect()
-        await ctx.send(f"🎩 Зашел в `{channel.name}`. Готов слушать.")
+        await ctx.author.voice.channel.connect()
+        await ctx.send("🎩 Зашел. Готов к работе.")
     else:
-        await ctx.send("Сначала зайдите в голосовой канал!")
+        await ctx.send("Сначала сами зайдите в голосовой канал.")
 
 @bot.command()
 async def record(ctx):
-    """Начать запись."""
     voice = ctx.voice_client
     if not voice:
-        await ctx.send("Используйте !join сначала.")
-        return
+        return await ctx.send("Сначала позовите меня командой !join")
+    
+    # ПРОВЕРКА: Если запись уже идет, не запускаем вторую
+    if voice.recording:
+        return await ctx.send("⚠️ Запись уже вовсю идет!")
 
-    await ctx.send("⏺ **Запись и транскрибация запущены.** Говорите...")
-    # WaveSink сохраняет аудио в оперативной памяти до момента остановки
+    await ctx.send("⏺ **Запись пошла.**")
     voice.start_recording(discord.sinks.WaveSink(), once_done, ctx.channel)
 
 @bot.command()
