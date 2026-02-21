@@ -73,6 +73,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Guilds currently running Whisper transcription; no new recording until done
 transcribing_guilds = set()
 
+# Max recording length (minutes); after this, recording stops and a new one can be started
+MAX_RECORDING_MINUTES = int(os.getenv("RECORDING_MAX_MINUTES", "30"))
+MAX_RECORDING_SECONDS = MAX_RECORDING_MINUTES * 60
+
 
 @bot.event
 async def on_ready():
@@ -136,9 +140,27 @@ async def join(ctx):
         await ctx.send("Join a voice channel first.")
 
 
+async def _enforce_recording_limit(guild_id: int, channel_id: int):
+    """After MAX_RECORDING_SECONDS, stop the current recording and notify; user can start a new one with !record."""
+    await asyncio.sleep(MAX_RECORDING_SECONDS)
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    voice = guild.voice_client
+    if voice and voice.recording:
+        logger.info("Recording limit (%d min) reached for guild %s, stopping", MAX_RECORDING_MINUTES, guild_id)
+        voice.stop_recording()
+        ch = guild.get_channel(channel_id)
+        if ch:
+            try:
+                await ch.send(f"⏱ **{MAX_RECORDING_MINUTES} min limit reached.** Use `!record` to start a new recording.")
+            except discord.DiscordException:
+                pass
+
+
 @bot.command()
 async def record(ctx):
-    """Start recording and transcribing voice in the current channel."""
+    """Start recording and transcribing voice in the current channel (max length set by RECORDING_MAX_MINUTES, default 30 min)."""
     logger.info("!record from %s in guild %s (channel %s)", ctx.author, ctx.guild.id, ctx.channel.name)
     voice = ctx.voice_client
     if not voice:
@@ -151,9 +173,10 @@ async def record(ctx):
         logger.debug("Rejected: transcription in progress for guild %s", ctx.guild.id)
         return await ctx.send("⚠️ Previous recording is still being transcribed. Wait for it to finish.")
 
-    logger.info("Recording started in %s (guild %s)", voice.channel.name, ctx.guild.id)
-    await ctx.send("⏺ **Recording started.**")
+    logger.info("Recording started in %s (guild %s), limit %d min", voice.channel.name, ctx.guild.id, MAX_RECORDING_MINUTES)
+    await ctx.send(f"⏺ **Recording started.** (max {MAX_RECORDING_MINUTES} min)")
     voice.start_recording(discord.sinks.WaveSink(), once_done, ctx.channel)
+    asyncio.create_task(_enforce_recording_limit(ctx.guild.id, ctx.channel.id))
 
 
 @bot.command()
