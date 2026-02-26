@@ -113,17 +113,23 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Stop recording when the last human leaves the voice channel."""
-    if before.channel is not None:
-        voice_client = member.guild.voice_client
-        if voice_client and voice_client.channel == before.channel:
-            human_members = [m for m in before.channel.members if not m.bot]
-            logger.debug("Voice state: %s left %s (guild %s), humans left: %d", member.display_name, before.channel.name, member.guild.id, len(human_members))
-            if len(human_members) == 0:
-                if voice_client.recording:
-                    logger.info("Channel %s (guild %s) empty, stopping recording", before.channel.name, member.guild.id)
-                    voice_client.stop_recording()
-                    await asyncio.sleep(1)
+    """When the last human leaves the bot's voice channel: stop recording (triggers transcription) and leave."""
+    if before.channel is None:
+        return
+    voice_client = member.guild.voice_client
+    if not voice_client or voice_client.channel != before.channel:
+        return
+    # After this member left: who remains in the channel (before.channel.members may still include member in some versions)
+    humans_remaining = [m for m in before.channel.members if m != member and not m.bot]
+    logger.debug("Voice state: %s left %s (guild %s), humans remaining: %d", member.display_name, before.channel.name, member.guild.id, len(humans_remaining))
+    if len(humans_remaining) != 0:
+        return
+    # Bot is alone (or channel empty): stop recording then leave
+    if voice_client.recording:
+        logger.info("Channel %s (guild %s) empty, stopping recording → transcription will run", before.channel.name, member.guild.id)
+        voice_client.stop_recording()
+    await voice_client.disconnect()
+    logger.info("Left voice channel %s (guild %s), no users left", before.channel.name, member.guild.id)
 
 
 @bot.command()
