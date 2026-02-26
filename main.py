@@ -86,6 +86,11 @@ transcribing_guilds = set()
 MAX_RECORDING_MINUTES = int(os.getenv("RECORDING_MAX_MINUTES", "30"))
 MAX_RECORDING_SECONDS = MAX_RECORDING_MINUTES * 60
 
+# Whisper transcription: language (ISO code) and beam_size
+# Empty language (default) lets Whisper auto-detect.
+TRANSCRIPT_LANGUAGE = os.getenv("TRANSCRIPT_LANGUAGE", "")
+TRANSCRIPT_BEAM_SIZE = int(os.getenv("TRANSCRIPT_BEAM_SIZE", "5"))
+
 
 @bot.event
 async def on_ready():
@@ -257,7 +262,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
             try:
                 def _transcribe(path: str):
-                    segments_iter, _ = model.transcribe(path, beam_size=5, language="ru")
+                    segments_iter, _ = model.transcribe(path, beam_size=TRANSCRIPT_BEAM_SIZE, language=TRANSCRIPT_LANGUAGE)
                     return list(segments_iter)
 
                 segments_list = await asyncio.to_thread(_transcribe, file_name)
