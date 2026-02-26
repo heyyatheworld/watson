@@ -1,0 +1,48 @@
+# Виртуальные окружения (самое важное!)
+venv/
+.venv/
+env/
+.env/
+bin/
+lib/
+include/
+share/
+
+# Кэш Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Распределенные пакеты и сборка
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter Notebooks (чекпоинты)
+.ipynb_checkpoints
+
+# Данные и логи (если они тяжелые)
+*.log
+*.sqlite
+*.db
+data/
+datasets/
