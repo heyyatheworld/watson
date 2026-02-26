@@ -4,7 +4,10 @@ import asyncio
 import gc
 import logging
 import os
+import shutil
 import tempfile
+from datetime import datetime
+
 import psutil
 import discord
 from discord.ext import commands
@@ -18,6 +21,12 @@ _watson_temp_dir = os.getenv("WATSON_TEMP_DIR")
 if not _watson_temp_dir:
     _watson_temp_dir = os.path.join(tempfile.gettempdir(), "watson")
 os.makedirs(_watson_temp_dir, exist_ok=True)
+
+# Persistent directory for saved voice recordings
+_watson_recordings_dir = os.getenv("WATSON_RECORDINGS_DIR")
+if not _watson_recordings_dir:
+    _watson_recordings_dir = os.path.join(_watson_temp_dir, "recordings")
+os.makedirs(_watson_recordings_dir, exist_ok=True)
 
 # Logging: level from env, optional file output
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
@@ -87,8 +96,9 @@ MAX_RECORDING_MINUTES = int(os.getenv("RECORDING_MAX_MINUTES", "30"))
 MAX_RECORDING_SECONDS = MAX_RECORDING_MINUTES * 60
 
 # Whisper transcription: language (ISO code) and beam_size
-# Empty language (default) lets Whisper auto-detect.
-TRANSCRIPT_LANGUAGE = os.getenv("TRANSCRIPT_LANGUAGE", "")
+# None = auto-detect (faster-whisper does not accept empty string)
+_transcript_lang = (os.getenv("TRANSCRIPT_LANGUAGE") or "").strip()
+TRANSCRIPT_LANGUAGE = _transcript_lang or None
 TRANSCRIPT_BEAM_SIZE = int(os.getenv("TRANSCRIPT_BEAM_SIZE", "5"))
 
 
@@ -241,12 +251,17 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
     all_phrases = []
     junk_phrases = ["editor", "subtitles", "thanks for watching", "to be continued", "а.семкин", "субтитры", "продолжение следует", "спасибо за просмотр"]
+    # (temp_path, user_id) for cleanup and later copy to permanent storage
     temp_files = []
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_guild = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name)
+    safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name)
+    temp_guild_dir = os.path.join(_watson_temp_dir, str(guild_id))
+    os.makedirs(temp_guild_dir, exist_ok=True)
 
     try:
         for user_id, audio in sink.audio_data.items():
-            file_name = os.path.join(_watson_temp_dir, f"temp_{guild_id}_{user_id}.wav")
-            temp_files.append(file_name)
+            temp_path = os.path.join(temp_guild_dir, f"temp_{user_id}.wav")
 
             audio.file.seek(0)
             data = audio.file.read()
@@ -256,16 +271,17 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                 logger.debug("Skipping user %s: audio too short (%d bytes)", user_id, data_len)
                 continue
 
-            with open(file_name, "wb") as f:
+            with open(temp_path, "wb") as f:
                 f.write(data)
-            logger.debug("Saved %s (%d bytes), transcribing user %s", file_name, data_len, user_id)
+            logger.debug("Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id)
+            temp_files.append((temp_path, user_id))
 
             try:
                 def _transcribe(path: str):
                     segments_iter, _ = model.transcribe(path, beam_size=TRANSCRIPT_BEAM_SIZE, language=TRANSCRIPT_LANGUAGE)
                     return list(segments_iter)
 
-                segments_list = await asyncio.to_thread(_transcribe, file_name)
+                segments_list = await asyncio.to_thread(_transcribe, temp_path)
                 num_segments = len(segments_list)
                 logger.info("Transcribed user %s: %d segments", user_id, num_segments)
                 _log_memory("after_transcribe_user_%s" % user_id)
@@ -297,19 +313,47 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
         header = f"📋 **TRANSCRIPT ({channel.guild.name})**\n\n"
         total_len = len(header) + len(raw_transcript)
+        transcript_plain = raw_transcript.replace("**", "")
+
+        # Save transcript alongside voice recordings (same name prefix for sorting)
+        transcript_saved_path = os.path.join(
+            _watson_recordings_dir,
+            f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
+        )
+        try:
+            with open(transcript_saved_path, "w", encoding="utf-8") as f:
+                f.write(transcript_plain)
+            logger.debug("Saved transcript to %s", transcript_saved_path)
+        except OSError as e:
+            logger.warning("Could not save transcript to %s: %s", transcript_saved_path, e)
 
         try:
-            if total_len > 2000:
-                file_path = os.path.join(_watson_temp_dir, f"transcript_{guild_id}.txt")
+            if total_len > 100:
+                file_path = os.path.join(temp_guild_dir, "transcript.txt")
                 with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(raw_transcript.replace("**", ""))
+                    f.write(transcript_plain)
                 logger.info("Transcript too long (%d chars), sending as file %s (guild %s)", total_len, file_path, guild_id)
                 await channel.send(header + "See attachment:", file=discord.File(file_path))
-                if os.path.exists(file_path):
-                    os.remove(file_path)
             else:
                 logger.info("Sending transcript (%d chars) to channel (guild %s)", total_len, guild_id)
                 await status_msg.edit(content=header + raw_transcript)
+
+            # Copy temp WAVs to permanent storage, then we clear temp in finally
+            recording_paths = []
+            for temp_path, user_id in temp_files:
+                file_name = f"{timestamp}-{safe_guild}-{safe_channel}-user{user_id}.wav"
+                dest = os.path.join(_watson_recordings_dir, file_name)
+                try:
+                    shutil.copy2(temp_path, dest)
+                    recording_paths.append(dest)
+                except OSError as e:
+                    logger.warning("Could not copy %s to %s: %s", temp_path, dest, e)
+            if recording_paths or transcript_saved_path:
+                lines = [f"- `{p}`" for p in recording_paths]
+                if os.path.exists(transcript_saved_path):
+                    lines.append(f"- `{transcript_saved_path}` (transcript)")
+                if lines:
+                    await channel.send(f"📁 Saved to recordings:\n" + "\n".join(lines))
         except discord.DiscordException as e:
             logger.exception("Failed to send transcript to channel (guild %s): %s", guild_id, e)
             try:
@@ -320,13 +364,16 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     finally:
         transcribing_guilds.discard(guild_id)
         logger.debug("Removed guild %s from transcribing_guilds", guild_id)
-        for f in temp_files:
-            if os.path.exists(f):
-                os.remove(f)
+        # Remove this guild's temp subdir (WAVs + transcript)
+        if os.path.isdir(temp_guild_dir):
+            try:
+                shutil.rmtree(temp_guild_dir)
+            except OSError as e:
+                logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
         del sink
         gc.collect()
         _log_memory("transcription_done")
-        logger.info("Session finished for guild %s (%s), cleaned %d temp files", guild_id, guild_name, len(temp_files))
+        logger.info("Session finished for guild %s (%s), saved %d recording(s)", guild_id, guild_name, len(temp_files))
 
 
 token = os.getenv("DISCORD_TOKEN")

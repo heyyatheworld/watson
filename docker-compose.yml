@@ -5,8 +5,10 @@ services:
     env_file: .env
     environment:
       - WATSON_TEMP_DIR=/app/temp
+      - WATSON_RECORDINGS_DIR=/app/recordings
     volumes:
       - ./temp:/app/temp
+      - ./recordings:/app/recordings
       - whisper_model_cache:/root/.cache/huggingface
 
 volumes:
