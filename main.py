@@ -8,8 +8,8 @@ import shutil
 import tempfile
 from datetime import datetime
 
-import psutil
 import discord
+import psutil
 from discord.ext import commands
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
@@ -65,19 +65,24 @@ def build_transcript_lines(phrases: list[dict]) -> str:
         lines.append(f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}\n")
     return "".join(lines)
 
-logging.getLogger('discord.voicereader').setLevel(logging.ERROR)
-logging.getLogger('discord.voicereader').propagate = False
+
+logging.getLogger("discord.voicereader").setLevel(logging.ERROR)
+logging.getLogger("discord.voicereader").propagate = False
 
 # Load Opus before creating the bot (required on macOS Homebrew)
+_opus_path = os.getenv("OPUS_LIB_PATH", "/opt/homebrew/lib/libopus.dylib")
 try:
-    discord.opus.load_opus('/opt/homebrew/lib/libopus.dylib')
+    discord.opus.load_opus(_opus_path)
     logger.info("Opus loaded")
 except Exception as e:
     logger.info("Opus fallback: %s", e)
 _log_memory("after_opus")
 
-logger.info("Loading Whisper model (turbo)...")
-model = WhisperModel("turbo", device="cpu", compute_type="int8")
+_whisper_model = os.getenv("WHISPER_MODEL", "turbo")
+_whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
+_whisper_compute = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+logger.info("Loading Whisper model (%s)...", _whisper_model)
+model = WhisperModel(_whisper_model, device=_whisper_device, compute_type=_whisper_compute)
 logger.info("Whisper ready")
 logger.info("Temp dir for recordings: %s", _watson_temp_dir)
 _log_memory("after_whisper_load")
@@ -86,7 +91,8 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+_bot_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
+bot = commands.Bot(command_prefix=_bot_prefix, intents=intents)
 
 # Guilds currently running Whisper transcription; no new recording until done
 transcribing_guilds = set()
@@ -94,6 +100,9 @@ transcribing_guilds = set()
 # Max recording length (minutes); after this, recording stops and a new one can be started
 MAX_RECORDING_MINUTES = int(os.getenv("RECORDING_MAX_MINUTES", "30"))
 MAX_RECORDING_SECONDS = MAX_RECORDING_MINUTES * 60
+# Send a warning to the channel this many seconds before auto-stop
+WARNING_BEFORE_STOP_MINUTES = int(os.getenv("WARNING_BEFORE_STOP_MINUTES", "5"))
+WARNING_BEFORE_STOP_SECONDS = WARNING_BEFORE_STOP_MINUTES * 60
 
 # Whisper transcription: language (ISO code) and beam_size
 # None = auto-detect (faster-whisper does not accept empty string)
@@ -101,11 +110,22 @@ _transcript_lang = (os.getenv("TRANSCRIPT_LANGUAGE") or "").strip()
 TRANSCRIPT_LANGUAGE = _transcript_lang or None
 TRANSCRIPT_BEAM_SIZE = int(os.getenv("TRANSCRIPT_BEAM_SIZE", "5"))
 
+# Phrases to filter out from transcript (pipe-separated in env)
+_default_junk = "editor|subtitles|thanks for watching|to be continued|а.семкин|субтитры|продолжение следует|спасибо за просмотр"
+TRANSCRIPT_JUNK_PHRASES = [
+    p.strip() for p in os.getenv("TRANSCRIPT_JUNK_PHRASES", _default_junk).split("|") if p.strip()
+]
+
 
 @bot.event
 async def on_ready():
     """Log bot name, ID, and guild count when the bot comes online."""
-    logger.info("Watson online — %s (ID: %s), guilds: %d", bot.user.name, bot.user.id, len(bot.guilds))
+    logger.info(
+        "Watson online — %s (ID: %s), guilds: %d",
+        bot.user.name,
+        bot.user.id,
+        len(bot.guilds),
+    )
     _log_memory("on_ready")
     for guild in bot.guilds:
         logger.info("  Guild: %s (ID: %s)", guild.name, guild.id)
@@ -121,21 +141,41 @@ async def on_voice_state_update(member, before, after):
         return
     # After this member left: who remains in the channel (before.channel.members may still include member in some versions)
     humans_remaining = [m for m in before.channel.members if m != member and not m.bot]
-    logger.debug("Voice state: %s left %s (guild %s), humans remaining: %d", member.display_name, before.channel.name, member.guild.id, len(humans_remaining))
+    logger.debug(
+        "Voice state: %s left %s (guild %s), humans remaining: %d",
+        member.display_name,
+        before.channel.name,
+        member.guild.id,
+        len(humans_remaining),
+    )
     if len(humans_remaining) != 0:
         return
     # Bot is alone (or channel empty): stop recording then leave
     if voice_client.recording:
-        logger.info("Channel %s (guild %s) empty, stopping recording → transcription will run", before.channel.name, member.guild.id)
+        logger.info(
+            "Channel %s (guild %s) empty, stopping recording → transcription will run",
+            before.channel.name,
+            member.guild.id,
+        )
         voice_client.stop_recording()
     await voice_client.disconnect()
-    logger.info("Left voice channel %s (guild %s), no users left", before.channel.name, member.guild.id)
+    logger.info(
+        "Left voice channel %s (guild %s), no users left",
+        before.channel.name,
+        member.guild.id,
+    )
 
 
 @bot.command()
 async def check(ctx):
     """Reply with connection status and bot permissions in the current channel."""
-    logger.info("!check from %s in %s/#%s (guild %s)", ctx.author, ctx.guild.name, ctx.channel.name, ctx.guild.id)
+    logger.info(
+        "!check from %s in %s/#%s (guild %s)",
+        ctx.author,
+        ctx.guild.name,
+        ctx.channel.name,
+        ctx.guild.id,
+    )
     perms = ctx.channel.permissions_for(ctx.me)
     status = [
         f"✅ **Connection:** OK",
@@ -143,12 +183,12 @@ async def check(ctx):
         f"📝 **Send messages:** {'✅' if perms.send_messages else '❌'}",
         f"📎 **Attach files:** {'✅' if perms.attach_files else '❌'}",
         f"📜 **Read history:** {'✅' if perms.read_message_history else '❌'}",
-        f"🎙 **Speak:** {'✅' if perms.speak else '❌'}"
+        f"🎙 **Speak:** {'✅' if perms.speak else '❌'}",
     ]
     embed = discord.Embed(
         title="Watson system check",
         description="\n".join(status),
-        color=discord.Color.blue() if perms.attach_files else discord.Color.red()
+        color=discord.Color.blue() if perms.attach_files else discord.Color.red(),
     )
     await ctx.send(embed=embed)
 
@@ -171,19 +211,47 @@ async def join(ctx):
 
 
 async def _enforce_recording_limit(guild_id: int, channel_id: int):
-    """After MAX_RECORDING_SECONDS, stop the current recording and notify; user can start a new one with !record."""
-    await asyncio.sleep(MAX_RECORDING_SECONDS)
+    """After MAX_RECORDING_SECONDS, stop the current recording and notify; user can start a new one with !record.
+    Sends a warning to the channel 5 minutes before the limit."""
+    warning_after = max(0, MAX_RECORDING_SECONDS - WARNING_BEFORE_STOP_SECONDS)
+    await asyncio.sleep(warning_after)
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    ch = guild.get_channel(channel_id)
+    voice = guild.voice_client
+    if (
+        voice
+        and voice.recording
+        and ch
+        and WARNING_BEFORE_STOP_SECONDS < MAX_RECORDING_SECONDS
+    ):
+        try:
+            await ch.send(
+                f"⚠️ **Осталось {WARNING_BEFORE_STOP_MINUTES} мин** до автоматической остановки записи (лимит {MAX_RECORDING_MINUTES} мин). "
+                "Можно остановить вручную: `!stop`."
+            )
+        except discord.DiscordException:
+            pass
+    remaining = MAX_RECORDING_SECONDS - warning_after
+    await asyncio.sleep(remaining)
     guild = bot.get_guild(guild_id)
     if not guild:
         return
     voice = guild.voice_client
     if voice and voice.recording:
-        logger.info("Recording limit (%d min) reached for guild %s, stopping", MAX_RECORDING_MINUTES, guild_id)
+        logger.info(
+            "Recording limit (%d min) reached for guild %s, stopping",
+            MAX_RECORDING_MINUTES,
+            guild_id,
+        )
         voice.stop_recording()
         ch = guild.get_channel(channel_id)
         if ch:
             try:
-                await ch.send(f"⏱ **{MAX_RECORDING_MINUTES} min limit reached.** Use `!record` to start a new recording.")
+                await ch.send(
+                    f"⏱ **{MAX_RECORDING_MINUTES} min limit reached.** Use `!record` to start a new recording."
+                )
             except discord.DiscordException:
                 pass
 
@@ -191,7 +259,12 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int):
 @bot.command()
 async def record(ctx):
     """Start recording and transcribing voice in the current channel (max length set by RECORDING_MAX_MINUTES, default 30 min)."""
-    logger.info("!record from %s in guild %s (channel %s)", ctx.author, ctx.guild.id, ctx.channel.name)
+    logger.info(
+        "!record from %s in guild %s (channel %s)",
+        ctx.author,
+        ctx.guild.id,
+        ctx.channel.name,
+    )
     voice = ctx.voice_client
     if not voice:
         logger.debug("Rejected: bot not in voice channel")
@@ -201,9 +274,16 @@ async def record(ctx):
         return await ctx.send("⚠️ Recording is already in progress.")
     if ctx.guild.id in transcribing_guilds:
         logger.debug("Rejected: transcription in progress for guild %s", ctx.guild.id)
-        return await ctx.send("⚠️ Previous recording is still being transcribed. Wait for it to finish.")
+        return await ctx.send(
+            "⚠️ Previous recording is still being transcribed. Wait for it to finish."
+        )
 
-    logger.info("Recording started in %s (guild %s), limit %d min", voice.channel.name, ctx.guild.id, MAX_RECORDING_MINUTES)
+    logger.info(
+        "Recording started in %s (guild %s), limit %d min",
+        voice.channel.name,
+        ctx.guild.id,
+        MAX_RECORDING_MINUTES,
+    )
     await ctx.send(f"⏺ **Recording started.** (max {MAX_RECORDING_MINUTES} min)")
     voice.start_recording(discord.sinks.WaveSink(), once_done, ctx.channel)
     asyncio.create_task(_enforce_recording_limit(ctx.guild.id, ctx.channel.id))
@@ -215,7 +295,11 @@ async def stop(ctx):
     logger.info("!stop from %s in guild %s", ctx.author, ctx.guild.id)
     voice = ctx.voice_client
     if voice and voice.recording:
-        logger.info("Stopping recording in %s (guild %s), transcript will follow", voice.channel.name, ctx.guild.id)
+        logger.info(
+            "Stopping recording in %s (guild %s), transcript will follow",
+            voice.channel.name,
+            ctx.guild.id,
+        )
         voice.stop_recording()
         await ctx.send("⏹ Recording stopped. Building transcript...")
     else:
@@ -243,7 +327,13 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     guild_name = channel.guild.name
     num_participants = len(sink.audio_data) if sink.audio_data else 0
 
-    logger.info("once_done: guild %s (%s), channel %s, participants: %d", guild_id, guild_name, channel.name, num_participants)
+    logger.info(
+        "once_done: guild %s (%s), channel %s, participants: %d",
+        guild_id,
+        guild_name,
+        channel.name,
+        num_participants,
+    )
 
     if not sink.audio_data:
         logger.info("Empty recording for guild %s, skipping transcription", guild_id)
@@ -256,12 +346,16 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     status_msg = await channel.send("⚙️ **Watson is processing audio...**")
 
     all_phrases = []
-    junk_phrases = ["editor", "subtitles", "thanks for watching", "to be continued", "а.семкин", "субтитры", "продолжение следует", "спасибо за просмотр"]
+    junk_phrases = TRANSCRIPT_JUNK_PHRASES
     # (temp_path, user_id) for cleanup and later copy to permanent storage
     temp_files = []
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    safe_guild = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name)
-    safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name)
+    safe_guild = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name
+    )
+    safe_channel = "".join(
+        c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name
+    )
     temp_guild_dir = os.path.join(_watson_temp_dir, str(guild_id))
     os.makedirs(temp_guild_dir, exist_ok=True)
 
@@ -274,17 +368,26 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             data_len = len(data)
 
             if data_len < 2000:
-                logger.debug("Skipping user %s: audio too short (%d bytes)", user_id, data_len)
+                logger.debug(
+                    "Skipping user %s: audio too short (%d bytes)", user_id, data_len
+                )
                 continue
 
             with open(temp_path, "wb") as f:
                 f.write(data)
-            logger.debug("Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id)
+            logger.debug(
+                "Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id
+            )
             temp_files.append((temp_path, user_id))
 
             try:
+
                 def _transcribe(path: str):
-                    segments_iter, _ = model.transcribe(path, beam_size=TRANSCRIPT_BEAM_SIZE, language=TRANSCRIPT_LANGUAGE)
+                    segments_iter, _ = model.transcribe(
+                        path,
+                        beam_size=TRANSCRIPT_BEAM_SIZE,
+                        language=TRANSCRIPT_LANGUAGE,
+                    )
                     return list(segments_iter)
 
                 segments_list = await asyncio.to_thread(_transcribe, temp_path)
@@ -297,17 +400,18 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
                 for seg in segments_list:
                     text = (seg.text or "").strip()
-                    if not any(junk in text.lower() for junk in junk_phrases) and len(text) > 1:
-                        all_phrases.append({
-                            'time': seg.start,
-                            'user': username,
-                            'text': text
-                        })
+                    if (
+                        not any(junk in text.lower() for junk in junk_phrases)
+                        and len(text) > 1
+                    ):
+                        all_phrases.append(
+                            {"time": seg.start, "user": username, "text": text}
+                        )
                 del segments_list
             except Exception as e:
                 logger.exception("Whisper error for user %s: %s", user_id, e)
 
-        all_phrases.sort(key=lambda x: x['time'])
+        all_phrases.sort(key=lambda x: x["time"])
         logger.debug("Collected %d phrases", len(all_phrases))
 
         raw_transcript = build_transcript_lines(all_phrases)
@@ -331,17 +435,30 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                 f.write(transcript_plain)
             logger.debug("Saved transcript to %s", transcript_saved_path)
         except OSError as e:
-            logger.warning("Could not save transcript to %s: %s", transcript_saved_path, e)
+            logger.warning(
+                "Could not save transcript to %s: %s", transcript_saved_path, e
+            )
 
         try:
             if total_len > 100:
                 file_path = os.path.join(temp_guild_dir, "transcript.txt")
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(transcript_plain)
-                logger.info("Transcript too long (%d chars), sending as file %s (guild %s)", total_len, file_path, guild_id)
-                await channel.send(header + "See attachment:", file=discord.File(file_path))
+                logger.info(
+                    "Transcript too long (%d chars), sending as file %s (guild %s)",
+                    total_len,
+                    file_path,
+                    guild_id,
+                )
+                await channel.send(
+                    header + "See attachment:", file=discord.File(file_path)
+                )
             else:
-                logger.info("Sending transcript (%d chars) to channel (guild %s)", total_len, guild_id)
+                logger.info(
+                    "Sending transcript (%d chars) to channel (guild %s)",
+                    total_len,
+                    guild_id,
+                )
                 await status_msg.edit(content=header + raw_transcript)
 
             # Copy temp WAVs to permanent storage, then we clear temp in finally
@@ -361,9 +478,13 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                 if lines:
                     await channel.send(f"📁 Saved to recordings:\n" + "\n".join(lines))
         except discord.DiscordException as e:
-            logger.exception("Failed to send transcript to channel (guild %s): %s", guild_id, e)
+            logger.exception(
+                "Failed to send transcript to channel (guild %s): %s", guild_id, e
+            )
             try:
-                await channel.send("⚠️ Transcript ready but failed to post. Check bot permissions and logs.")
+                await channel.send(
+                    "⚠️ Transcript ready but failed to post. Check bot permissions and logs."
+                )
             except discord.DiscordException:
                 pass
 
@@ -379,7 +500,12 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         del sink
         gc.collect()
         _log_memory("transcription_done")
-        logger.info("Session finished for guild %s (%s), saved %d recording(s)", guild_id, guild_name, len(temp_files))
+        logger.info(
+            "Session finished for guild %s (%s), saved %d recording(s)",
+            guild_id,
+            guild_name,
+            len(temp_files),
+        )
 
 
 token = os.getenv("DISCORD_TOKEN")
