@@ -418,11 +418,9 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             await status_msg.edit(content="😶 Could not recognize any speech.")
             return
 
-        header = f"📋 **TRANSCRIPT ({channel.guild.name})**\n\n"
-        total_len = len(header) + len(raw_transcript)
         transcript_plain = raw_transcript.replace("**", "")
 
-        # Save transcript alongside voice recordings (same name prefix for sorting)
+        # Save transcript to recordings (no transcript text sent to channel)
         transcript_saved_path = os.path.join(
             _watson_recordings_dir,
             f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
@@ -437,28 +435,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             )
 
         try:
-            if total_len > 100:
-                file_path = os.path.join(temp_guild_dir, "transcript.txt")
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(transcript_plain)
-                logger.info(
-                    "Transcript too long (%d chars), sending as file %s (guild %s)",
-                    total_len,
-                    file_path,
-                    guild_id,
-                )
-                await channel.send(
-                    header + "See attachment:", file=discord.File(file_path)
-                )
-            else:
-                logger.info(
-                    "Sending transcript (%d chars) to channel (guild %s)",
-                    total_len,
-                    guild_id,
-                )
-                await status_msg.edit(content=header + raw_transcript)
-
-            # Copy temp WAVs to permanent storage, then we clear temp in finally
+            # Copy temp WAVs to permanent storage
             recording_paths = []
             for temp_path, user_id in temp_files:
                 file_name = f"{timestamp}-{safe_guild}-{safe_channel}-user{user_id}.wav"
@@ -468,19 +445,22 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                     recording_paths.append(dest)
                 except OSError as e:
                     logger.warning("Could not copy %s to %s: %s", temp_path, dest, e)
-            if recording_paths or transcript_saved_path:
-                lines = [f"- `{p}`" for p in recording_paths]
-                if os.path.exists(transcript_saved_path):
-                    lines.append(f"- `{transcript_saved_path}` (transcript)")
-                if lines:
-                    await channel.send(f"📁 Saved to recordings:\n" + "\n".join(lines))
+            lines = [f"- `{p}`" for p in recording_paths]
+            if os.path.exists(transcript_saved_path):
+                lines.append(f"- `{transcript_saved_path}` (transcript)")
+            if lines:
+                await status_msg.edit(
+                    content="✅ **Done.**\n\n📁 Saved to recordings:\n" + "\n".join(lines)
+                )
+            else:
+                await status_msg.edit(content="✅ **Done.** (no files saved)")
         except discord.DiscordException as e:
             logger.exception(
-                "Failed to send transcript to channel (guild %s): %s", guild_id, e
+                "Failed to send message to channel (guild %s): %s", guild_id, e
             )
             try:
                 await channel.send(
-                    "⚠️ Transcript ready but failed to post. Check bot permissions and logs."
+                    "⚠️ Processing finished but failed to post. Check bot permissions and logs."
                 )
             except discord.DiscordException:
                 pass
