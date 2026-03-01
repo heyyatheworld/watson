@@ -42,6 +42,26 @@ logger = logging.getLogger(__name__)
 logging.getLogger("discord").setLevel(logging.WARNING)
 
 
+class _SuppressOpusDecodeFilter(logging.Filter):
+    """Suppress repeated 'Error occurred while decoding opus frame' log records."""
+
+    _last_log_time = 0.0
+    _cooldown_sec = 60.0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = str(getattr(record, "msg", "")) + str(getattr(record, "args", ()))
+        if "decoding opus frame" not in msg.lower():
+            return True
+        now = time.monotonic()
+        if now - _SuppressOpusDecodeFilter._last_log_time >= _SuppressOpusDecodeFilter._cooldown_sec:
+            _SuppressOpusDecodeFilter._last_log_time = now
+            return True
+        return False
+
+
+logging.getLogger().addFilter(_SuppressOpusDecodeFilter())
+
+
 def _memory_mb():
     """Return current process RSS in MB, or None if unavailable."""
     try:
