@@ -58,4 +58,5 @@ def main_module():
         patch("os.makedirs", MagicMock()),
     ):
         import main as _main
+        _main.bot = MagicMock()
         return _main

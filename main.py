@@ -68,13 +68,37 @@ def build_transcript_lines(phrases: list[dict]) -> str:
 
 logging.getLogger("discord.voicereader").setLevel(logging.ERROR)
 logging.getLogger("discord.voicereader").propagate = False
+logging.getLogger("discord.opus").setLevel(logging.ERROR)
 
-_opus_path = os.getenv("OPUS_LIB_PATH", "/opt/homebrew/lib/libopus.dylib")
-try:
-    discord.opus.load_opus(_opus_path)
-    logger.info("Opus loaded")
-except Exception as e:
-    logger.info("Opus fallback: %s", e)
+_OPUS_FALLBACK_PATHS = [
+    "/opt/homebrew/lib/libopus.dylib",
+    "/usr/lib/x86_64-linux-gnu/libopus.so.0",
+    "/usr/lib/aarch64-linux-gnu/libopus.so.0",
+    "libopus.so.0",
+]
+
+
+def _load_opus() -> None:
+    """Load Opus library from OPUS_LIB_PATH or fallback paths. Required for voice."""
+    explicit = os.getenv("OPUS_LIB_PATH")
+    if explicit:
+        paths = [explicit]
+    else:
+        paths = _OPUS_FALLBACK_PATHS
+    for path in paths:
+        try:
+            discord.opus.load_opus(path)
+            logger.info("Opus loaded: %s", path)
+            return
+        except Exception as e:
+            logger.debug("Opus load failed for %s: %s", path, e)
+    logger.warning(
+        "Opus could not be loaded from any path. Voice may fail with decode errors. "
+        "Set OPUS_LIB_PATH to your libopus path (e.g. /opt/homebrew/lib/libopus.dylib on macOS)."
+    )
+
+
+_load_opus()
 _log_memory("after_opus")
 
 _whisper_model = os.getenv("WHISPER_MODEL", "turbo")
@@ -91,7 +115,7 @@ intents.message_content = True
 intents.members = True
 
 _bot_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
-bot = commands.Bot(command_prefix=_bot_prefix, intents=intents)
+bot: commands.Bot | None = None
 
 transcribing_guilds = set()
 
@@ -163,9 +187,9 @@ if not os.getenv("WATSON_SKIP_ENV_CHECK"):
     _check_environment()
 
 
-@bot.event
 async def on_ready() -> None:
     """Log bot name, ID, and guild count when the bot comes online."""
+    assert bot is not None
     logger.info(
         "Watson online — %s (ID: %s), guilds: %d",
         bot.user.name,
@@ -177,7 +201,6 @@ async def on_ready() -> None:
         logger.info("  Guild: %s (ID: %s)", guild.name, guild.id)
 
 
-@bot.event
 async def on_voice_state_update(member, before, after) -> None:
     """
     When the last human leaves the bot's voice channel, stop recording and leave.
@@ -215,7 +238,6 @@ async def on_voice_state_update(member, before, after) -> None:
     )
 
 
-@bot.command()
 async def check(ctx) -> None:
     """Reply with connection status and bot permissions in the current channel."""
     logger.info(
@@ -242,7 +264,6 @@ async def check(ctx) -> None:
     await ctx.send(embed=embed)
 
 
-@bot.command()
 async def join(ctx) -> None:
     """Join the voice channel the author is in."""
     logger.info("!join from %s in guild %s", ctx.author, ctx.guild.id)
@@ -264,6 +285,7 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int) -> None:
     After MAX_RECORDING_SECONDS, stop the current recording and notify.
     Sends a warning to the channel WARNING_BEFORE_STOP_MINUTES before the limit.
     """
+    assert bot is not None
     warning_after = max(0, MAX_RECORDING_SECONDS - WARNING_BEFORE_STOP_SECONDS)
     await asyncio.sleep(warning_after)
     guild = bot.get_guild(guild_id)
@@ -307,7 +329,6 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int) -> None:
                 pass
 
 
-@bot.command()
 async def record(ctx) -> None:
     """Start recording in the current voice channel (max length from RECORDING_MAX_MINUTES)."""
     logger.info(
@@ -340,7 +361,6 @@ async def record(ctx) -> None:
     asyncio.create_task(_enforce_recording_limit(ctx.guild.id, ctx.channel.id))
 
 
-@bot.command()
 async def stop(ctx) -> None:
     """Stop the current recording and run transcription and recap."""
     logger.info("!stop from %s in guild %s", ctx.author, ctx.guild.id)
@@ -358,7 +378,6 @@ async def stop(ctx) -> None:
         await ctx.send("I'm not recording right now.")
 
 
-@bot.command()
 async def leave(ctx) -> None:
     """Leave the current voice channel."""
     logger.info("!leave from %s in guild %s", ctx.author, ctx.guild.id)
@@ -426,6 +445,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
     Process recorded audio: transcribe with Whisper, save WAV and transcript to recordings,
     post recap (if Ollama enabled) and file links to the channel.
     """
+    assert bot is not None
     guild_id = channel.guild.id
     guild_name = channel.guild.name
     num_participants = len(sink.audio_data) if sink.audio_data else 0
@@ -481,6 +501,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
                 "Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id
             )
             temp_files.append((temp_path, user_id))
+            await asyncio.sleep(0)
 
             try:
 
@@ -494,6 +515,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
                     return list(segments_iter)
 
                 segments_list = await asyncio.to_thread(_transcribe, temp_path)
+                await asyncio.sleep(0)
                 num_segments = len(segments_list)
                 logger.info("Transcribed user %s: %d segments", user_id, num_segments)
                 _log_memory("after_transcribe_user_%s" % user_id)
@@ -526,11 +548,13 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
 
         transcript_plain = raw_transcript.replace("**", "")
 
+        await asyncio.sleep(0)
         recap = None
         if OLLAMA_RECAP_MODEL:
             recap = await asyncio.to_thread(
                 _get_recap_sync, transcript_plain
             )
+            await asyncio.sleep(0)
         recap_block = (recap + "\n\n") if recap else ""
 
         transcript_saved_path = os.path.join(
@@ -592,12 +616,17 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
         transcribing_guilds.discard(guild_id)
         logger.debug("Removed guild %s from transcribing_guilds", guild_id)
         if os.path.isdir(temp_guild_dir):
+            def _rmtree() -> None:
+                try:
+                    shutil.rmtree(temp_guild_dir)
+                except OSError as e:
+                    logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
             try:
-                shutil.rmtree(temp_guild_dir)
-            except OSError as e:
-                logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
+                await asyncio.to_thread(_rmtree)
+            except Exception:
+                _rmtree()
         del sink
-        gc.collect()
+        await asyncio.to_thread(gc.collect)
         _log_memory("transcription_done")
         logger.info(
             "Session finished for guild %s (%s), saved %d recording(s)",
@@ -610,11 +639,27 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
 SHUTDOWN_WAIT_TRANSCRIPTION_SEC = 300
 
 
+def _create_bot() -> commands.Bot:
+    """Create and configure the bot. Must be called when the event loop is already running."""
+    b = commands.Bot(command_prefix=_bot_prefix, intents=intents)
+    b.add_listener(on_ready)
+    b.add_listener(on_voice_state_update)
+    b.command(name="check")(check)
+    b.command(name="join")(join)
+    b.command(name="record")(record)
+    b.command(name="stop")(stop)
+    b.command(name="leave")(leave)
+    return b
+
+
 async def _run_bot_with_graceful_shutdown(token: str) -> None:
     """
     Run the bot until SIGTERM/SIGINT; then wait for active transcriptions
     (up to SHUTDOWN_WAIT_TRANSCRIPTION_SEC), close the Discord connection, and exit.
     """
+    global bot
+    bot = _create_bot()
+
     shutdown_ev = asyncio.Event()
 
     def _on_signal() -> None:
