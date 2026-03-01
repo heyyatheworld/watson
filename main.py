@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 
 import discord
+import ollama
 import psutil
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -113,6 +114,13 @@ TRANSCRIPT_JUNK_PHRASES = [
     p.strip() for p in os.getenv("TRANSCRIPT_JUNK_PHRASES", _default_junk).split("|") if p.strip()
 ]
 
+# Ollama recap: model name (empty = disabled), prompt file path
+OLLAMA_RECAP_MODEL = (os.getenv("OLLAMA_RECAP_MODEL") or "").strip() or None
+_recap_prompt_file = os.getenv("RECAP_PROMPT_FILE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "prompts", "recap.txt"
+)
+RECAP_MAX_CHARS = 400  # trim if model returns longer
+
 
 @bot.event
 async def on_ready():
@@ -132,6 +140,9 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     """When the last human leaves the bot's voice channel: stop recording (triggers transcription) and leave."""
     if before.channel is None:
+        return
+    # User only changed mute/deaf in the same channel — did not leave; ignore
+    if after.channel is not None and after.channel.id == before.channel.id:
         return
     voice_client = member.guild.voice_client
     if not voice_client or voice_client.channel != before.channel:
@@ -318,6 +329,39 @@ async def leave(ctx):
         await ctx.send("I'm not in a voice channel.")
 
 
+def _get_recap_sync(transcript: str) -> str | None:
+    """Generate a short recap via Ollama. Returns None if disabled, prompt missing, or on error."""
+    if not OLLAMA_RECAP_MODEL:
+        return None
+    try:
+        if not os.path.isfile(_recap_prompt_file):
+            logger.warning("Recap prompt file not found: %s", _recap_prompt_file)
+            return None
+        with open(_recap_prompt_file, "r", encoding="utf-8") as f:
+            prompt_template = f.read()
+        prompt = prompt_template.replace("{{TRANSCRIPT}}", transcript)
+        # Limit input size to avoid token overflow
+        if len(prompt) > 12000:
+            prompt = prompt[:12000] + "\n\n[truncated]"
+        client = ollama.Client(
+            host=os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        )
+        response = client.chat(
+            model=OLLAMA_RECAP_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = (response.get("message") or {}).get("content") or ""
+        text = text.strip()
+        if not text:
+            return None
+        if len(text) > RECAP_MAX_CHARS:
+            text = text[: RECAP_MAX_CHARS - 3].rstrip() + "..."
+        return text
+    except Exception as e:
+        logger.warning("Ollama recap failed: %s", e)
+        return None
+
+
 async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     """Process recorded audio: transcribe with Whisper and post transcript to the channel."""
     guild_id = channel.guild.id
@@ -435,6 +479,13 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             )
 
         try:
+            recap = None
+            if OLLAMA_RECAP_MODEL:
+                recap = await asyncio.to_thread(
+                    _get_recap_sync, transcript_plain
+                )
+            recap_block = (recap + "\n\n") if recap else ""
+
             # Copy temp WAVs to permanent storage
             recording_paths = []
             for temp_path, user_id in temp_files:
@@ -450,10 +501,15 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                 lines.append(f"- `{transcript_saved_path}` (transcript)")
             if lines:
                 await status_msg.edit(
-                    content="✅ **Done.**\n\n📁 Saved to recordings:\n" + "\n".join(lines)
+                    content="✅ **Done.**\n\n"
+                    + recap_block
+                    + "📁 Saved to recordings:\n"
+                    + "\n".join(lines)
                 )
             else:
-                await status_msg.edit(content="✅ **Done.** (no files saved)")
+                await status_msg.edit(
+                    content="✅ **Done.**\n\n" + recap_block + "(no files saved)"
+                )
         except discord.DiscordException as e:
             logger.exception(
                 "Failed to send message to channel (guild %s): %s", guild_id, e

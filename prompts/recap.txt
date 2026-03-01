@@ -1,0 +1,10 @@
+You are given a transcript of a voice conversation. Write a short recap (200-300 characters).
+
+Rules:
+- Write in the SAME language as the transcript (e.g. Russian transcript → Russian recap).
+- Include: what was discussed, what decisions were made (if any), who is responsible for what (if mentioned).
+- If nothing concrete can be extracted (e.g. small talk, no decisions), say so briefly and honestly. Do not invent or embellish.
+- Output ONLY the recap text, no preamble or labels.
+
+Transcript:
+{{TRANSCRIPT}}
