@@ -1,29 +1,22 @@
-# Тесты Watson
+# Watson tests
 
-## Текущие тесты
+## Current tests
 
-- **Моки без Discord/Whisper** — в `conftest.py` подменяются `discord`, `faster_whisper`, `psutil`; `main` импортируется без токена и без загрузки модели.
-- **Логика** — `build_transcript_lines`, лимиты записи, отклонения команд (`!record` без голоса, при идёт транскрипции в той же гильдии).
-- **Конкурентные записи в разных гильдиях** — проверяется, что блокировка «идёт транскрипция» действует только внутри одной гильдии: пока гильдия A в транскрипции, гильдия B может запустить `!record` (см. `test_record_allowed_other_guild_while_one_transcribing`).
+- **Mocks** — `conftest.py` mocks `discord`, `faster_whisper`, `ollama`, `psutil`; `main` is imported without a token or model.
+- **Logic** — `build_transcript_lines`, recording limits, command rejections (`!record` when not in voice, or when transcription is in progress in the same guild).
+- **Concurrent recordings** — `test_record_allowed_other_guild_while_one_transcribing` ensures the “transcription in progress” block applies per guild: guild B can start `!record` while guild A is transcribing.
 
-Запуск: из корня проекта `pytest tests/ -v`.
+Run from project root: `pytest tests/ -v`.
 
-## Как тестировать одновременные записи в разных каналах
+## Testing concurrent recordings in different channels
 
-### 1. Программно (моки, без реального Discord)
+### 1. With mocks (no real Discord)
 
-- **Уже есть:** тесты выше проверяют, что разные гильдии не блокируют друг друга по `transcribing_guilds`.
-- **Расширить:** можно добавить тест, который дергает `once_done` для двух гильдий параллельно (`asyncio.gather`), с моками:
-  - `sink` с `audio_data = {user_id: MockAudio(bytes)}`;
-  - `channel` с `guild.id`, `guild.name`, `channel.name`;
-  - подмена `model.transcribe` и записи в файл, чтобы не вызывать реальный Whisper.
-- Цель: убедиться, что два одновременных `once_done` не мешают друг другу (разные `temp_guild_dir`, разные `guild_id` в `transcribing_guilds`).
+- Existing tests already check that different guilds do not block each other via `transcribing_guilds`.
+- To go further: add a test that calls `once_done` for two guilds in parallel (`asyncio.gather`) with mocked sink (e.g. `audio_data = {user_id: MockAudio(bytes)}`), channel, and `model.transcribe` / file I/O, to confirm two concurrent `once_done` runs do not interfere (separate `temp_guild_dir`, separate `guild_id` in `transcribing_guilds`). No extra “bot” processes needed; use mocks only.
 
-Ботов-имитаторов писать не нужно: достаточно моков объектов discord.py и вызова реальных функций `record`, `once_done` и т.д.
+### 2. Manual run with real bot
 
-### 2. Вручную с реальным ботом
-
-- Два сервера (или два голосовых канала в одном сервере — но тогда один бот в одном канале, поэтому два сервера нагляднее).
-- В каждом: зайти в голос, `!join`, `!record`. Выйти из канала в одном сервере — бот должен обработать только эту запись и выйти только из этого канала; во втором запись продолжается.
-
-Это проверяет реальное поведение Discord и голосовых сокетов без автоматизации.
+- Two servers (or two voice channels; one bot can only be in one voice channel per server).
+- In each: join voice, `!join`, `!record`. Leave the channel in one server — the bot should process only that recording and leave only that channel; the other keeps recording.
+- This checks real Discord and voice behaviour without automation.

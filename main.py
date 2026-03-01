@@ -1,11 +1,17 @@
-"""Discord bot that records voice channel audio and transcribes it with faster-whisper."""
+"""
+Discord bot: record voice channel audio, transcribe with faster-whisper,
+optionally summarize with Ollama. Saves WAV and transcript to disk; posts recap and file links.
+"""
 
 import asyncio
 import gc
 import logging
 import os
+import signal
 import shutil
+import sys
 import tempfile
+import time
 from datetime import datetime
 
 import discord
@@ -17,16 +23,12 @@ from faster_whisper import WhisperModel
 
 load_dotenv()
 
-# Temp: intermediate WAVs and transcript during processing; cleared after each transcription.
-# In a container this can be ephemeral (no volume needed).
 _watson_temp_dir = os.getenv("WATSON_TEMP_DIR") or "./temp"
 os.makedirs(_watson_temp_dir, exist_ok=True)
 
-# Recordings: final WAV files and transcript .txt; persisted. In a container, mount a volume here.
 _watson_recordings_dir = os.getenv("WATSON_RECORDINGS_DIR") or "./recordings"
 os.makedirs(_watson_recordings_dir, exist_ok=True)
 
-# Logging: level from env, optional file output
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 logging.basicConfig(level=log_level, format=log_format, datefmt="%Y-%m-%d %H:%M:%S")
@@ -67,7 +69,6 @@ def build_transcript_lines(phrases: list[dict]) -> str:
 logging.getLogger("discord.voicereader").setLevel(logging.ERROR)
 logging.getLogger("discord.voicereader").propagate = False
 
-# Load Opus before creating the bot (required on macOS Homebrew)
 _opus_path = os.getenv("OPUS_LIB_PATH", "/opt/homebrew/lib/libopus.dylib")
 try:
     discord.opus.load_opus(_opus_path)
@@ -92,38 +93,78 @@ intents.members = True
 _bot_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
 bot = commands.Bot(command_prefix=_bot_prefix, intents=intents)
 
-# Guilds currently running Whisper transcription; no new recording until done
 transcribing_guilds = set()
 
-# Max recording length (minutes); after this, recording stops and a new one can be started
 MAX_RECORDING_MINUTES = int(os.getenv("RECORDING_MAX_MINUTES", "30"))
 MAX_RECORDING_SECONDS = MAX_RECORDING_MINUTES * 60
-# Send a warning to the channel this many seconds before auto-stop
 WARNING_BEFORE_STOP_MINUTES = int(os.getenv("WARNING_BEFORE_STOP_MINUTES", "5"))
 WARNING_BEFORE_STOP_SECONDS = WARNING_BEFORE_STOP_MINUTES * 60
 
-# Whisper transcription: language (ISO code) and beam_size
-# None = auto-detect (faster-whisper does not accept empty string)
 _transcript_lang = (os.getenv("TRANSCRIPT_LANGUAGE") or "").strip()
 TRANSCRIPT_LANGUAGE = _transcript_lang or None
 TRANSCRIPT_BEAM_SIZE = int(os.getenv("TRANSCRIPT_BEAM_SIZE", "5"))
 
-# Phrases to filter out from transcript (pipe-separated in env)
-_default_junk = "editor|subtitles|thanks for watching|to be continued|а.семкин|субтитры|продолжение следует|спасибо за просмотр"
+_default_junk = "editor|subtitles|thanks for watching|to be continued"
 TRANSCRIPT_JUNK_PHRASES = [
     p.strip() for p in os.getenv("TRANSCRIPT_JUNK_PHRASES", _default_junk).split("|") if p.strip()
 ]
 
-# Ollama recap: model name (empty = disabled), prompt file path
 OLLAMA_RECAP_MODEL = (os.getenv("OLLAMA_RECAP_MODEL") or "").strip() or None
 _recap_prompt_file = os.getenv("RECAP_PROMPT_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "prompts", "recap.txt"
 )
-RECAP_MAX_CHARS = 400  # trim if model returns longer
+RECAP_MAX_CHARS = 400
+
+OLLAMA_RETRIES = 3
+OLLAMA_RETRY_DELAY = 2.0
+
+
+def _check_environment() -> None:
+    """
+    Verify temp and recordings dirs are writable; if recap is enabled, verify Ollama is reachable.
+    Exits with a clear message on failure.
+    """
+    for name, path in [
+        ("WATSON_TEMP_DIR", _watson_temp_dir),
+        ("WATSON_RECORDINGS_DIR", _watson_recordings_dir),
+    ]:
+        try:
+            os.makedirs(path, exist_ok=True)
+            test_file = os.path.join(path, ".watson_write_test")
+            with open(test_file, "w") as f:
+                f.write("")
+            os.remove(test_file)
+        except OSError as e:
+            logger.error("%s is not writable: %s — %s", name, path, e)
+            sys.exit(1)
+    if OLLAMA_RECAP_MODEL:
+        if not os.path.isfile(_recap_prompt_file):
+            logger.error(
+                "OLLAMA_RECAP_MODEL is set but recap prompt file not found: %s",
+                _recap_prompt_file,
+            )
+            sys.exit(1)
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        try:
+            client = ollama.Client(host=ollama_host)
+            client.list()
+        except Exception as e:
+            logger.error(
+                "Ollama is not reachable at %s (OLLAMA_RECAP_MODEL=%s): %s",
+                ollama_host,
+                OLLAMA_RECAP_MODEL,
+                e,
+            )
+            sys.exit(1)
+    logger.debug("Environment check passed")
+
+
+if not os.getenv("WATSON_SKIP_ENV_CHECK"):
+    _check_environment()
 
 
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
     """Log bot name, ID, and guild count when the bot comes online."""
     logger.info(
         "Watson online — %s (ID: %s), guilds: %d",
@@ -137,17 +178,18 @@ async def on_ready():
 
 
 @bot.event
-async def on_voice_state_update(member, before, after):
-    """When the last human leaves the bot's voice channel: stop recording (triggers transcription) and leave."""
+async def on_voice_state_update(member, before, after) -> None:
+    """
+    When the last human leaves the bot's voice channel, stop recording and leave.
+    Ignores mute/deafen (same channel); only reacts to actual leave.
+    """
     if before.channel is None:
         return
-    # User only changed mute/deaf in the same channel — did not leave; ignore
     if after.channel is not None and after.channel.id == before.channel.id:
         return
     voice_client = member.guild.voice_client
     if not voice_client or voice_client.channel != before.channel:
         return
-    # After this member left: who remains in the channel (before.channel.members may still include member in some versions)
     humans_remaining = [m for m in before.channel.members if m != member and not m.bot]
     logger.debug(
         "Voice state: %s left %s (guild %s), humans remaining: %d",
@@ -158,7 +200,6 @@ async def on_voice_state_update(member, before, after):
     )
     if len(humans_remaining) != 0:
         return
-    # Bot is alone (or channel empty): stop recording then leave
     if voice_client.recording:
         logger.info(
             "Channel %s (guild %s) empty, stopping recording → transcription will run",
@@ -175,7 +216,7 @@ async def on_voice_state_update(member, before, after):
 
 
 @bot.command()
-async def check(ctx):
+async def check(ctx) -> None:
     """Reply with connection status and bot permissions in the current channel."""
     logger.info(
         "!check from %s in %s/#%s (guild %s)",
@@ -202,7 +243,7 @@ async def check(ctx):
 
 
 @bot.command()
-async def join(ctx):
+async def join(ctx) -> None:
     """Join the voice channel the author is in."""
     logger.info("!join from %s in guild %s", ctx.author, ctx.guild.id)
     if ctx.voice_client:
@@ -218,9 +259,11 @@ async def join(ctx):
         await ctx.send("Join a voice channel first.")
 
 
-async def _enforce_recording_limit(guild_id: int, channel_id: int):
-    """After MAX_RECORDING_SECONDS, stop the current recording and notify; user can start a new one with !record.
-    Sends a warning to the channel 5 minutes before the limit."""
+async def _enforce_recording_limit(guild_id: int, channel_id: int) -> None:
+    """
+    After MAX_RECORDING_SECONDS, stop the current recording and notify.
+    Sends a warning to the channel WARNING_BEFORE_STOP_MINUTES before the limit.
+    """
     warning_after = max(0, MAX_RECORDING_SECONDS - WARNING_BEFORE_STOP_SECONDS)
     await asyncio.sleep(warning_after)
     guild = bot.get_guild(guild_id)
@@ -236,8 +279,8 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int):
     ):
         try:
             await ch.send(
-                f"⚠️ **Осталось {WARNING_BEFORE_STOP_MINUTES} мин** до автоматической остановки записи (лимит {MAX_RECORDING_MINUTES} мин). "
-                "Можно остановить вручную: `!stop`."
+                f"⚠️ **{WARNING_BEFORE_STOP_MINUTES} min left** until auto-stop (limit {MAX_RECORDING_MINUTES} min). "
+                "Stop manually with `!stop`."
             )
         except discord.DiscordException:
             pass
@@ -265,8 +308,8 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int):
 
 
 @bot.command()
-async def record(ctx):
-    """Start recording and transcribing voice in the current channel (max length set by RECORDING_MAX_MINUTES, default 30 min)."""
+async def record(ctx) -> None:
+    """Start recording in the current voice channel (max length from RECORDING_MAX_MINUTES)."""
     logger.info(
         "!record from %s in guild %s (channel %s)",
         ctx.author,
@@ -298,8 +341,8 @@ async def record(ctx):
 
 
 @bot.command()
-async def stop(ctx):
-    """Stop the current recording and process the transcript."""
+async def stop(ctx) -> None:
+    """Stop the current recording and run transcription and recap."""
     logger.info("!stop from %s in guild %s", ctx.author, ctx.guild.id)
     voice = ctx.voice_client
     if voice and voice.recording:
@@ -316,7 +359,7 @@ async def stop(ctx):
 
 
 @bot.command()
-async def leave(ctx):
+async def leave(ctx) -> None:
     """Leave the current voice channel."""
     logger.info("!leave from %s in guild %s", ctx.author, ctx.guild.id)
     if ctx.voice_client:
@@ -330,40 +373,59 @@ async def leave(ctx):
 
 
 def _get_recap_sync(transcript: str) -> str | None:
-    """Generate a short recap via Ollama. Returns None if disabled, prompt missing, or on error."""
+    """
+    Generate a short recap via Ollama with retries.
+    Returns None if disabled, prompt file missing, or on error after retries.
+    """
     if not OLLAMA_RECAP_MODEL:
         return None
+    if not os.path.isfile(_recap_prompt_file):
+        logger.warning("Recap prompt file not found: %s", _recap_prompt_file)
+        return None
     try:
-        if not os.path.isfile(_recap_prompt_file):
-            logger.warning("Recap prompt file not found: %s", _recap_prompt_file)
-            return None
         with open(_recap_prompt_file, "r", encoding="utf-8") as f:
             prompt_template = f.read()
-        prompt = prompt_template.replace("{{TRANSCRIPT}}", transcript)
-        # Limit input size to avoid token overflow
-        if len(prompt) > 12000:
-            prompt = prompt[:12000] + "\n\n[truncated]"
-        client = ollama.Client(
-            host=os.getenv("OLLAMA_HOST", "http://localhost:11434")
-        )
-        response = client.chat(
-            model=OLLAMA_RECAP_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = (response.get("message") or {}).get("content") or ""
-        text = text.strip()
-        if not text:
-            return None
-        if len(text) > RECAP_MAX_CHARS:
-            text = text[: RECAP_MAX_CHARS - 3].rstrip() + "..."
-        return text
-    except Exception as e:
-        logger.warning("Ollama recap failed: %s", e)
+    except OSError as e:
+        logger.warning("Could not read recap prompt: %s", e)
         return None
+    prompt = prompt_template.replace("{{TRANSCRIPT}}", transcript)
+    if len(prompt) > 12000:
+        prompt = prompt[:12000] + "\n\n[truncated]"
+    client = ollama.Client(host=os.getenv("OLLAMA_HOST", "http://localhost:11434"))
+    last_error = None
+    for attempt in range(OLLAMA_RETRIES):
+        try:
+            response = client.chat(
+                model=OLLAMA_RECAP_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = (response.get("message") or {}).get("content") or ""
+            text = text.strip()
+            if not text:
+                return None
+            if len(text) > RECAP_MAX_CHARS:
+                text = text[: RECAP_MAX_CHARS - 3].rstrip() + "..."
+            return text
+        except Exception as e:
+            last_error = e
+            if attempt < OLLAMA_RETRIES - 1:
+                logger.debug(
+                    "Ollama recap attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt + 1,
+                    OLLAMA_RETRIES,
+                    OLLAMA_RETRY_DELAY,
+                    e,
+                )
+                time.sleep(OLLAMA_RETRY_DELAY)
+    logger.warning("Ollama recap failed after %d attempts: %s", OLLAMA_RETRIES, last_error)
+    return None
 
 
-async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
-    """Process recorded audio: transcribe with Whisper and post transcript to the channel."""
+async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) -> None:
+    """
+    Process recorded audio: transcribe with Whisper, save WAV and transcript to recordings,
+    post recap (if Ollama enabled) and file links to the channel.
+    """
     guild_id = channel.guild.id
     guild_name = channel.guild.name
     num_participants = len(sink.audio_data) if sink.audio_data else 0
@@ -388,7 +450,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
     all_phrases = []
     junk_phrases = TRANSCRIPT_JUNK_PHRASES
-    # (temp_path, user_id) for cleanup and later copy to permanent storage
     temp_files = []
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     safe_guild = "".join(
@@ -424,6 +485,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             try:
 
                 def _transcribe(path: str):
+                    """Run Whisper on path; return list of segments."""
                     segments_iter, _ = model.transcribe(
                         path,
                         beam_size=TRANSCRIPT_BEAM_SIZE,
@@ -471,7 +533,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             )
         recap_block = (recap + "\n\n") if recap else ""
 
-        # Save transcript to recordings: header, empty line, recap (if any), empty line, transcript
         transcript_saved_path = os.path.join(
             _watson_recordings_dir,
             f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
@@ -493,8 +554,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             )
 
         try:
-
-            # Copy temp WAVs to permanent storage
             recording_paths = []
             for temp_path, user_id in temp_files:
                 file_name = f"{timestamp}-{safe_guild}-{safe_channel}-user{user_id}.wav"
@@ -532,7 +591,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     finally:
         transcribing_guilds.discard(guild_id)
         logger.debug("Removed guild %s from transcribing_guilds", guild_id)
-        # Remove this guild's temp subdir (WAVs + transcript)
         if os.path.isdir(temp_guild_dir):
             try:
                 shutil.rmtree(temp_guild_dir)
@@ -549,9 +607,60 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         )
 
 
-token = os.getenv("DISCORD_TOKEN")
-if not token:
-    logger.error("DISCORD_TOKEN not found in .env")
-    raise SystemExit("Set DISCORD_TOKEN in .env (see .env.example)")
-logger.info("Starting bot...")
-bot.run(token)
+SHUTDOWN_WAIT_TRANSCRIPTION_SEC = 300
+
+
+async def _run_bot_with_graceful_shutdown(token: str) -> None:
+    """
+    Run the bot until SIGTERM/SIGINT; then wait for active transcriptions
+    (up to SHUTDOWN_WAIT_TRANSCRIPTION_SEC), close the Discord connection, and exit.
+    """
+    shutdown_ev = asyncio.Event()
+
+    def _on_signal() -> None:
+        shutdown_ev.set()
+
+    try:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(
+                sig, _on_signal
+            )
+    except NotImplementedError:
+        signal.signal(signal.SIGTERM, lambda s, f: _on_signal())
+        signal.signal(signal.SIGINT, lambda s, f: _on_signal())
+
+    bot_task = asyncio.create_task(bot.start(token))
+    await shutdown_ev.wait()
+    logger.info("Shutdown requested, waiting for active transcriptions...")
+    deadline = time.monotonic() + SHUTDOWN_WAIT_TRANSCRIPTION_SEC
+    while transcribing_guilds and time.monotonic() < deadline:
+        await asyncio.sleep(1)
+    if transcribing_guilds:
+        logger.warning(
+            "Shutdown timeout, %d guild(s) still transcribing",
+            len(transcribing_guilds),
+        )
+    await bot.close()
+    try:
+        await asyncio.wait_for(bot_task, timeout=10.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    logger.info("Bot stopped.")
+
+
+def _main() -> None:
+    """Entry point: check token, then run bot with graceful shutdown."""
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        logger.error("DISCORD_TOKEN not found in .env")
+        sys.exit("Set DISCORD_TOKEN in .env (see .env.example)")
+    logger.info("Starting bot...")
+    try:
+        asyncio.run(_run_bot_with_graceful_shutdown(token))
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    _main()

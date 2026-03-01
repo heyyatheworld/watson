@@ -41,7 +41,6 @@ def test_log_memory_does_not_raise(main_module):
 
 def test_recording_limit_config(main_module):
     """MAX_RECORDING_SECONDS is 30 * 60 when env is default."""
-    # conftest does not set RECORDING_MAX_MINUTES, so default 30 is used
     assert main_module.MAX_RECORDING_MINUTES == 30
     assert main_module.MAX_RECORDING_SECONDS == 30 * 60
 
@@ -79,7 +78,7 @@ def test_record_allowed_other_guild_while_one_transcribing(main_module):
     """!record in another guild is allowed while guild A is transcribing (concurrent recordings)."""
     main_module.transcribing_guilds.add(111)
     ctx = MagicMock()
-    ctx.guild.id = 222  # different guild
+    ctx.guild.id = 222
     ctx.channel.name = "general"
     ctx.author = MagicMock()
     ctx.voice_client = MagicMock()
@@ -90,7 +89,6 @@ def test_record_allowed_other_guild_while_one_transcribing(main_module):
     ctx.voice_client.start_recording = MagicMock()
     try:
         asyncio.run(main_module.record(ctx))
-        # Should have started recording (send "Recording started"), not "transcription in progress"
         ctx.send.assert_called_once()
         call_args = ctx.send.call_args[0][0]
         assert "recording started" in call_args.lower() or "⏺" in call_args

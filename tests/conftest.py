@@ -1,4 +1,7 @@
-"""Pytest fixtures; inject fake modules so main can be imported without Discord/Whisper."""
+"""
+Pytest fixtures: fake discord, faster_whisper, ollama, psutil so main can be
+imported without real connections or model load.
+"""
 
 import os
 import sys
@@ -9,8 +12,10 @@ import pytest
 
 @pytest.fixture(scope="module")
 def main_module():
-    """Import main with Discord and faster_whisper faked so no real connections or model load."""
-    # Inject fake modules so "import main" does not require discord/faster_whisper to be importable
+    """
+    Import main with Discord, faster_whisper, ollama and psutil mocked.
+    No token or model required.
+    """
     fake_discord = MagicMock()
     fake_discord.opus.load_opus = MagicMock()
     fake_ext = MagicMock()
@@ -24,7 +29,8 @@ def main_module():
     fake_discord.ext = fake_ext
     fake_fw = MagicMock()
     fake_psutil = MagicMock()
-    fake_psutil.Process.return_value.memory_info.return_value.rss = 100 * 1024 * 1024  # 100 MB
+    fake_psutil.Process.return_value.memory_info.return_value.rss = 100 * 1024 * 1024
+    fake_ollama = MagicMock()
 
     with (
         patch.dict(
@@ -34,10 +40,19 @@ def main_module():
                 "discord.ext": fake_ext,
                 "discord.ext.commands": fake_commands,
                 "faster_whisper": fake_fw,
+                "ollama": fake_ollama,
                 "psutil": fake_psutil,
             },
         ),
-        patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "LOG_LEVEL": "WARNING"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "DISCORD_TOKEN": "test-token",
+                "LOG_LEVEL": "WARNING",
+                "WATSON_SKIP_ENV_CHECK": "1",
+            },
+            clear=False,
+        ),
         patch("dotenv.load_dotenv", MagicMock()),
         patch("tempfile.gettempdir", return_value="/tmp"),
         patch("os.makedirs", MagicMock()),

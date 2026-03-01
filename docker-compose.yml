@@ -7,7 +7,7 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     # Pull recap model: docker compose exec ollama ollama pull llama3.2
-# Set OLLAMA_RECAP_MODEL=llama3.2 in .env to enable recap.
+    # Set OLLAMA_RECAP_MODEL=llama3.2 in .env to enable recap.
 
   watson-bot:
     build: .
