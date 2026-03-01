@@ -464,14 +464,28 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
 
         transcript_plain = raw_transcript.replace("**", "")
 
-        # Save transcript to recordings (no transcript text sent to channel)
+        recap = None
+        if OLLAMA_RECAP_MODEL:
+            recap = await asyncio.to_thread(
+                _get_recap_sync, transcript_plain
+            )
+        recap_block = (recap + "\n\n") if recap else ""
+
+        # Save transcript to recordings: header, empty line, recap (if any), empty line, transcript
         transcript_saved_path = os.path.join(
             _watson_recordings_dir,
             f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
         )
+        date_str = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+        time_str = f"{timestamp[9:11]}:{timestamp[11:13]}:{timestamp[13:15]}"
+        transcript_header = f"{date_str} {time_str} — {guild_name} — {channel.name}"
+        file_content = transcript_header + "\n\n"
+        if recap:
+            file_content += recap + "\n\n"
+        file_content += transcript_plain
         try:
             with open(transcript_saved_path, "w", encoding="utf-8") as f:
-                f.write(transcript_plain)
+                f.write(file_content)
             logger.debug("Saved transcript to %s", transcript_saved_path)
         except OSError as e:
             logger.warning(
@@ -479,12 +493,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
             )
 
         try:
-            recap = None
-            if OLLAMA_RECAP_MODEL:
-                recap = await asyncio.to_thread(
-                    _get_recap_sync, transcript_plain
-                )
-            recap_block = (recap + "\n\n") if recap else ""
 
             # Copy temp WAVs to permanent storage
             recording_paths = []
