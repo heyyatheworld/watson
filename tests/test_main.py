@@ -57,3 +57,43 @@ def test_record_rejects_when_not_in_voice(main_module):
     ctx.send.assert_called_once()
     call_args = ctx.send.call_args[0][0]
     assert "join" in call_args.lower() or "invite" in call_args.lower()
+
+
+def test_record_rejects_same_guild_when_transcribing(main_module):
+    """!record in the same guild is rejected while previous recording is transcribing."""
+    main_module.transcribing_guilds.add(999)
+    ctx = MagicMock()
+    ctx.guild.id = 999
+    ctx.voice_client = MagicMock()
+    ctx.voice_client.recording = False
+    ctx.send = AsyncMock(return_value=None)
+    try:
+        asyncio.run(main_module.record(ctx))
+        call_args = ctx.send.call_args[0][0]
+        assert "transcrib" in call_args.lower() or "wait" in call_args.lower()
+    finally:
+        main_module.transcribing_guilds.discard(999)
+
+
+def test_record_allowed_other_guild_while_one_transcribing(main_module):
+    """!record in another guild is allowed while guild A is transcribing (concurrent recordings)."""
+    main_module.transcribing_guilds.add(111)
+    ctx = MagicMock()
+    ctx.guild.id = 222  # different guild
+    ctx.channel.name = "general"
+    ctx.author = MagicMock()
+    ctx.voice_client = MagicMock()
+    ctx.voice_client.recording = False
+    ctx.voice_client.channel = MagicMock()
+    ctx.voice_client.channel.name = "voice"
+    ctx.send = AsyncMock(return_value=None)
+    ctx.voice_client.start_recording = MagicMock()
+    try:
+        asyncio.run(main_module.record(ctx))
+        # Should have started recording (send "Recording started"), not "transcription in progress"
+        ctx.send.assert_called_once()
+        call_args = ctx.send.call_args[0][0]
+        assert "recording started" in call_args.lower() or "⏺" in call_args
+        ctx.voice_client.start_recording.assert_called_once()
+    finally:
+        main_module.transcribing_guilds.discard(111)

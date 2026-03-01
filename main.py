@@ -16,16 +16,13 @@ from faster_whisper import WhisperModel
 
 load_dotenv()
 
-# Temporary directory for WAV recordings and transcript files (avoids cluttering project dir)
-_watson_temp_dir = os.getenv("WATSON_TEMP_DIR")
-if not _watson_temp_dir:
-    _watson_temp_dir = os.path.join(tempfile.gettempdir(), "watson")
+# Temp: intermediate WAVs and transcript during processing; cleared after each transcription.
+# In a container this can be ephemeral (no volume needed).
+_watson_temp_dir = os.getenv("WATSON_TEMP_DIR") or "./temp"
 os.makedirs(_watson_temp_dir, exist_ok=True)
 
-# Persistent directory for saved voice recordings
-_watson_recordings_dir = os.getenv("WATSON_RECORDINGS_DIR")
-if not _watson_recordings_dir:
-    _watson_recordings_dir = os.path.join(_watson_temp_dir, "recordings")
+# Recordings: final WAV files and transcript .txt; persisted. In a container, mount a volume here.
+_watson_recordings_dir = os.getenv("WATSON_RECORDINGS_DIR") or "./recordings"
 os.makedirs(_watson_recordings_dir, exist_ok=True)
 
 # Logging: level from env, optional file output
@@ -84,7 +81,7 @@ _whisper_compute = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 logger.info("Loading Whisper model (%s)...", _whisper_model)
 model = WhisperModel(_whisper_model, device=_whisper_device, compute_type=_whisper_compute)
 logger.info("Whisper ready")
-logger.info("Temp dir for recordings: %s", _watson_temp_dir)
+logger.info("Temp dir (cleared after each transcription): %s", _watson_temp_dir)
 _log_memory("after_whisper_load")
 
 intents = discord.Intents.default()
