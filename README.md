@@ -1,36 +1,37 @@
 # Watson
 
-A Discord bot that records voice channel audio and transcribes it with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). It posts timestamped transcripts in the channel and stops recording automatically when everyone leaves the voice channel.
+Discord bot that records voice channel audio, transcribes it with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), and optionally generates a short recap with [Ollama](https://ollama.com). Saves WAV files and transcript text to disk; posts only a recap (if enabled) and links to saved files in the channel.
 
 **[Add Watson to your server](https://discord.com/oauth2/authorize?client_id=1474417737659846727&permissions=3147776&scope=bot)**
 
 ## Features
 
-- **Voice recording** — Joins a voice channel and records participants (WAV).
-- **Transcription** — Converts speech to text via faster-whisper (turbo model, CPU/int8); transcription runs in a thread so the bot stays responsive.
-- **Timestamped transcript** — Posts a transcript with `[MM:SS] User: text` in the channel, or sends it as a file if longer than Discord’s limit.
-- **Auto-stop** — When the last human leaves the voice channel, recording stops and the transcript is processed.
-- **Logging** — Configurable log level and optional file output via environment variables.
-- **Memory diagnostics** — Process RSS logged at key stages (after load, transcription start/done); optional `LOG_FILE` for persistence.
+- **Voice recording** — Joins a voice channel and records participants (WAV). Max length and “warning before stop” are configurable.
+- **Transcription** — Speech-to-text via faster-whisper (model/device/compute_type in `.env`). Runs in a thread so the bot stays responsive.
+- **Saved files** — WAV and transcript `.txt` are written to a recordings directory (configurable). The bot does **not** post transcript text in the channel, only a recap (if Ollama is on) and paths to the saved files.
+- **Ollama recap** — Optional short summary (200–300 chars) after each recording: what was discussed, decisions, who’s responsible. In the same language as the dialogue. Prompt is in `prompts/recap.txt`.
+- **Auto-stop** — When the last human **leaves** the voice channel, recording stops and processing runs. Mute/deafen in the same channel is ignored (bot does not leave).
+- **Config** — All settings via `.env` (prefix, temp/recordings dirs, Whisper, Ollama, recap prompt path). See `.env.example`.
 
 ## Prerequisites
 
 - Python 3.10+
-- [Discord bot token](https://discord.com/developers/applications) — create an application and bot, enable **Message Content Intent** and **Server Members Intent**
-- **macOS (Homebrew):** Opus is loaded from `/opt/homebrew/lib/libopus.dylib`; run `brew install opus` if needed
+- [Discord bot token](https://discord.com/developers/applications) — create an application and bot; enable **Message Content Intent** and **Server Members Intent**
+- **macOS (Homebrew):** Opus from `/opt/homebrew/lib/libopus.dylib` (or set `OPUS_LIB_PATH` in `.env`)
+
+For **recap**: [Ollama](https://ollama.com) installed and running (e.g. `ollama run llama3.2`). Set `OLLAMA_RECAP_MODEL` in `.env` to enable.
 
 ## Adding Watson to your server
 
-1. Open the **invite link** at the top of this README in your browser.
-2. Log in to Discord if prompted.
-3. Select the server you want to add the bot to. You must have **Manage Server** or **Administrator** on that server.
-4. Click **Authorize** and complete the captcha if shown.
+1. Open the **invite link** at the top of this README.
+2. Select the server (you need **Manage Server** or **Administrator**).
+3. Click **Authorize**.
 
-Watson will appear in your server’s member list. You can then use `!join`, `!record`, `!stop` in a text channel (see **Usage** below).
+Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see **Usage**).
 
 ## Setup
 
-1. **Clone and create a virtual environment**
+1. **Clone and venv**
 
    ```bash
    cd Watson
@@ -44,71 +45,107 @@ Watson will appear in your server’s member list. You can then use `!join`, `!r
    pip install -r requirements.txt
    ```
 
-   Main dependencies: `py-cord`, `faster-whisper`, `python-dotenv`, `psutil`.
+   Main deps: `py-cord`, `faster-whisper`, `ollama`, `python-dotenv`, `psutil`.
 
-3. **Configure environment**
+3. **Configure**
 
    ```bash
    cp .env.example .env
    ```
 
-   Edit `.env` and set:
+   Set at least:
 
    ```env
    DISCORD_TOKEN=your_bot_token_here
    ```
 
-   Optional:
+   Optional (see `.env.example`):
 
-   ```env
-   LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR
-   LOG_FILE=watson.log     # if set, logs are also written to this file
-   ```
+   - `BOT_COMMAND_PREFIX` (default `!`)
+   - `WATSON_TEMP_DIR`, `WATSON_RECORDINGS_DIR` (default `./temp`, `./recordings`)
+   - `RECORDING_MAX_MINUTES`, `WARNING_BEFORE_STOP_MINUTES`
+   - `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `TRANSCRIPT_LANGUAGE`, `TRANSCRIPT_BEAM_SIZE`
+   - `OLLAMA_HOST`, `OLLAMA_RECAP_MODEL`, `RECAP_PROMPT_FILE` (recap prompt path)
 
-   To create the bot and get the token: [Developer Portal](https://discord.com/developers/applications) → New Application → Bot → enable **Server Members Intent** and **Message Content Intent** → copy Token. To give others an invite link: OAuth2 → URL Generator → scope **bot**, permissions View Channels, Connect, Speak, Send Messages, Read Message History, Attach Files → share the generated URL.
+   Bot and invite: [Developer Portal](https://discord.com/developers/applications) → Bot → enable intents → OAuth2 URL Generator (scope **bot**, permissions: View Channels, Connect, Speak, Send Messages, Read Message History, Attach Files).
 
 ## Usage
 
-1. Invite the bot to your server. Required permissions: **View Channels**, **Connect**, **Speak**, **Send Messages**, **Read Message History**, **Attach Files**.
+1. Invite the bot. Required permissions: **View Channels**, **Connect**, **Speak**, **Send Messages**, **Read Message History**, **Attach Files**.
+
 2. In a text channel:
 
-   | Command   | Description                                      |
-   | --------- | ------------------------------------------------- |
-   | `!join`   | Bot joins your current voice channel              |
-   | `!record` | Start recording; speak in turn for best results   |
-   | `!stop`   | Stop recording and get the transcript             |
-   | `!leave`  | Bot leaves the voice channel                      |
-   | `!check`  | Show connection status and bot permissions (embed)|
+   | Command   | Description |
+   | --------- | ----------- |
+   | `!join`   | Bot joins your current voice channel |
+   | `!record` | Start recording (max length from `RECORDING_MAX_MINUTES`; warning in channel before auto-stop) |
+   | `!stop`   | Stop recording and process (transcribe + optional recap, then post recap and file links) |
+   | `!leave`  | Bot leaves the voice channel |
+   | `!check`  | Connection status and bot permissions (embed) |
 
-3. After `!stop`, the bot processes the audio with Whisper and posts the transcript. If the transcript is longer than 2000 characters, it is sent as `transcript_<guild_id>.txt`.
+3. After processing, the bot posts **Done**, then the **recap** (if `OLLAMA_RECAP_MODEL` is set), then **links to files** in the recordings directory (WAV per user, one transcript `.txt`). No full transcript text is sent in the channel.
 
-**Note:** Transcription uses `language="ru"`. You can change it in `main.py` in the `model.transcribe(...)` call. Model and device are set in code (`WhisperModel("turbo", device="cpu", compute_type="int8")`); use GPU by changing `device="cuda"` if available.
+**Saved transcript file** format: first line = header (date, time, guild name, channel name); blank line; recap (if any); blank line; transcript body.
+
+## Docker
+
+- **Ollama** runs as a separate service; the bot connects to it via `OLLAMA_HOST`.
+- **Recordings** directory in the container is mounted from the host so files persist.
+
+```bash
+docker compose up -d
+```
+
+Then pull a model for recap (if you use it):
+
+```bash
+docker compose exec ollama ollama pull llama3.2
+```
+
+In `.env` set `OLLAMA_RECAP_MODEL=llama3.2` (and optionally override `OLLAMA_HOST`; compose sets `OLLAMA_HOST=http://ollama:11434`).
+
+On a **remote host**, mount your host folders in `docker-compose.yml`, e.g.:
+
+```yaml
+volumes:
+  - /data/watson/recordings:/app/recordings
+  - /data/watson/temp:/app/temp
+```
 
 ## Troubleshooting
 
-- **High memory usage** — The bot logs RSS at key stages (`LOG_LEVEL=INFO`). After each session it runs `gc.collect()`. If you run on a small VPS, keep `device="cpu"` and `compute_type="int8"`.
-- **Slow transcription** — On a machine with a CUDA GPU, change in `main.py`: `WhisperModel("turbo", device="cuda", compute_type="float16")` (and install CUDA-compatible dependencies).
-- **Bot doesn’t respond** — Ensure **Message Content Intent** is enabled in the Developer Portal (Bot → Privileged Gateway Intents).
+- **Bot left when I muted** — Fixed: the bot only leaves when someone actually leaves the channel; mute/deafen in the same channel is ignored.
+- **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; bot logs RSS at key stages.
+- **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
+- **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.
+- **Bot doesn’t respond** — Enable **Message Content Intent** (and **Server Members Intent**) in the Developer Portal.
 
 ## Testing
 
-Run the test suite (requires pytest; Discord and faster-whisper are mocked so no token or model is needed):
+Discord and faster-whisper are mocked; no token or model needed:
 
 ```bash
 pytest tests/ -v
 ```
 
+See `tests/README.md` for testing concurrent recordings (mocks and manual).
+
 ## Project structure
 
 ```
 Watson/
-├── main.py           # Bot, voice recording, faster-whisper transcription
-├── tests/            # Basic tests (helpers, config, command mocks)
-├── pytest.ini        # Pytest config
-├── .env              # DISCORD_TOKEN, optional LOG_LEVEL, LOG_FILE (not committed)
-├── .env.example      # Template for .env
-├── requirements.txt  # Python dependencies
-└── README.md         # This file
+├── main.py              # Bot, recording, Whisper, Ollama recap
+├── prompts/
+│   └── recap.txt        # Prompt for recap ({{TRANSCRIPT}} placeholder)
+├── tests/
+│   ├── conftest.py      # Mocks for import without Discord/Whisper
+│   ├── test_main.py     # Helpers, config, command behaviour
+│   └── README.md        # How to test concurrent recordings
+├── Dockerfile           # Bot image (Ollama is separate in compose)
+├── docker-compose.yml   # watson-bot + ollama, volume mounts
+├── .env.example        # Env template
+├── requirements.txt
+└── README.md
 ```
 
 ## License

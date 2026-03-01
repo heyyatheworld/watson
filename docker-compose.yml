@@ -1,4 +1,14 @@
+# Recordings: host path (left) is mounted into container (right).
+# On remote host use e.g. /data/watson/recordings:/app/recordings
 services:
+  ollama:
+    image: ollama/ollama
+    restart: always
+    volumes:
+      - ollama_data:/root/.ollama
+    # Pull recap model: docker compose exec ollama ollama pull llama3.2
+# Set OLLAMA_RECAP_MODEL=llama3.2 in .env to enable recap.
+
   watson-bot:
     build: .
     restart: always
@@ -6,10 +16,14 @@ services:
     environment:
       - WATSON_TEMP_DIR=/app/temp
       - WATSON_RECORDINGS_DIR=/app/recordings
+      - OLLAMA_HOST=http://ollama:11434
     volumes:
       - ./temp:/app/temp
       - ./recordings:/app/recordings
       - whisper_model_cache:/root/.cache/huggingface
+    depends_on:
+      - ollama
 
 volumes:
+  ollama_data:
   whisper_model_cache:
