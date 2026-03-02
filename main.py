@@ -6,7 +6,8 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timezone
 
 import discord
 import ollama
@@ -79,8 +80,17 @@ _log_memory("after_opus")
 _whisper_model = os.getenv("WHISPER_MODEL", "turbo")
 _whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper_compute = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+# Limit CPU threads and workers so the event loop stays responsive (avoids heartbeat/4006 on 4-core).
+_cpu_threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
+_num_workers = int(os.getenv("WHISPER_NUM_WORKERS", "2"))
 logger.info("Loading Whisper model (%s)...", _whisper_model)
-model = WhisperModel(_whisper_model, device=_whisper_device, compute_type=_whisper_compute)
+model = WhisperModel(
+    _whisper_model,
+    device=_whisper_device,
+    compute_type=_whisper_compute,
+    cpu_threads=_cpu_threads,
+    num_workers=_num_workers,
+)
 logger.info("Whisper ready")
 logger.info("Temp dir (cleared after each transcription): %s", _watson_temp_dir)
 _log_memory("after_whisper_load")
@@ -90,7 +100,34 @@ intents.message_content = True
 intents.members = True
 
 _bot_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
-bot = commands.Bot(command_prefix=_bot_prefix, intents=intents)
+# Deduplicate MESSAGE_CREATE (gateway can deliver same event multiple times on Docker/Linux).
+_seen_msg_ids: set[int] = set()
+_seen_msg_ids_deque: deque[int] = deque(maxlen=500)
+_seen_msg_ids_lock = asyncio.Lock()
+
+
+class WatsonBot(commands.Bot):
+    """Bot that deduplicates on_message by message.id (max 500) to avoid duplicate command runs."""
+
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+        msg_id = message.id
+        async with _seen_msg_ids_lock:
+            if msg_id in _seen_msg_ids:
+                logger.warning(
+                    "Duplicate MESSAGE_CREATE for message id %s, skipping",
+                    msg_id,
+                )
+                return
+            if len(_seen_msg_ids_deque) == 500:
+                _seen_msg_ids.discard(_seen_msg_ids_deque[0])
+            _seen_msg_ids_deque.append(msg_id)
+            _seen_msg_ids.add(msg_id)
+        await self.process_commands(message)
+
+
+bot = WatsonBot(command_prefix=_bot_prefix, intents=intents)
 
 # Guilds currently running Whisper transcription; no new recording until done
 transcribing_guilds = set()
@@ -203,19 +240,26 @@ async def check(ctx):
 
 @bot.command()
 async def join(ctx):
-    """Join the voice channel the author is in."""
+    """Join the voice channel the author is in. Clears stale voice session and uses 20s connect timeout."""
     logger.info("!join from %s in guild %s", ctx.author, ctx.guild.id)
+    # Clear any stale voice session to avoid Error 4006 / timeouts
     if ctx.voice_client:
-        logger.debug("Rejected: already in channel %s", ctx.voice_client.channel.name)
-        return await ctx.send("I'm already in a channel! 🎙")
-    if ctx.author.voice:
-        ch = ctx.author.voice.channel
-        await ch.connect()
-        logger.info("Joined voice channel %s (guild %s)", ch.name, ctx.guild.id)
-        await ctx.send("🎩 Joined. Ready.")
-    else:
+        try:
+            await ctx.voice_client.disconnect(force=True)
+        except discord.DiscordException as e:
+            logger.debug("Disconnect(stale) failed: %s", e)
+    if not ctx.author.voice:
         logger.debug("Rejected: author not in voice channel")
-        await ctx.send("Join a voice channel first.")
+        return await ctx.send("Join a voice channel first.")
+    ch = ctx.author.voice.channel
+    try:
+        await asyncio.wait_for(ch.connect(), timeout=20.0)
+    except asyncio.TimeoutError:
+        logger.warning("Voice connect timed out (20s) for guild %s", ctx.guild.id)
+        return await ctx.send("⚠️ Voice connection timed out. Try again.")
+    await asyncio.sleep(1.0)  # Let voice gateway become ready
+    logger.info("Joined voice channel %s (guild %s)", ch.name, ctx.guild.id)
+    await ctx.send("🎩 Joined. Ready.")
 
 
 async def _enforce_recording_limit(guild_id: int, channel_id: int):
@@ -274,17 +318,17 @@ async def record(ctx):
         ctx.channel.name,
     )
     voice = ctx.voice_client
-    if not voice:
-        logger.debug("Rejected: bot not in voice channel")
-        return await ctx.send("Invite me with !join first.")
-    if voice.recording:
-        logger.debug("Rejected: recording already in progress")
-        return await ctx.send("⚠️ Recording is already in progress.")
+    if not voice or not voice.is_connected():
+        logger.debug("Rejected: no valid voice connection")
+        return await ctx.send("⚠️ No voice connection. Use `!join` first, then `!record`.")
     if ctx.guild.id in transcribing_guilds:
         logger.debug("Rejected: transcription in progress for guild %s", ctx.guild.id)
         return await ctx.send(
             "⚠️ Previous recording is still being transcribed. Wait for it to finish."
         )
+    if voice.recording:
+        logger.debug("Rejected: recording already in progress")
+        return await ctx.send("⚠️ Recording is already in progress.")
 
     logger.info(
         "Recording started in %s (guild %s), limit %d min",
@@ -390,7 +434,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     junk_phrases = TRANSCRIPT_JUNK_PHRASES
     # (temp_path, user_id) for cleanup and later copy to permanent storage
     temp_files = []
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_guild = "".join(
         c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name
     )
@@ -449,6 +493,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
                             {"time": seg.start, "user": username, "text": text}
                         )
                 del segments_list
+                gc.collect()
             except Exception as e:
                 logger.exception("Whisper error for user %s: %s", user_id, e)
 
@@ -532,13 +577,16 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
     finally:
         transcribing_guilds.discard(guild_id)
         logger.debug("Removed guild %s from transcribing_guilds", guild_id)
-        # Remove this guild's temp subdir (WAVs + transcript)
+        # Always remove temp dir (even if transcription failed)
         if os.path.isdir(temp_guild_dir):
             try:
                 shutil.rmtree(temp_guild_dir)
             except OSError as e:
                 logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
-        del sink
+        try:
+            del sink
+        except NameError:
+            pass
         gc.collect()
         _log_memory("transcription_done")
         logger.info(
