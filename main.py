@@ -12,7 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import discord
 import ollama
@@ -491,7 +491,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
     all_phrases = []
     junk_phrases = TRANSCRIPT_JUNK_PHRASES
     temp_files = []
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     safe_guild = "".join(
         c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name
     )
