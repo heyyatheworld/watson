@@ -119,6 +119,7 @@ volumes:
 - **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
 - **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.
 - **Bot doesn’t respond** — Enable **Message Content Intent** (and **Server Members Intent**) in the Developer Portal.
+- **"Error occurred while decoding opus frame"** — Usually a single bad voice packet; recording often continues. If it’s frequent, install libopus (e.g. `brew install opus` on macOS, `apt install libopus0` on Debian) and set `OPUS_LIB_PATH` in `.env` to the library path (see `.env.example`).
 
 ## Testing
 
