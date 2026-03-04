@@ -3,20 +3,30 @@ Discord bot: record voice channel audio, transcribe with faster-whisper,
 optionally summarize with Ollama. Saves WAV and transcript to disk; posts recap and file links.
 """
 
+import socket
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family in (0, socket.AF_UNSPEC):
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
+
 import asyncio
 import gc
 import logging
 import os
-import signal
 import shutil
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 
 import discord
 import ollama
-import psutil
 from discord.ext import commands
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
@@ -40,6 +50,49 @@ if log_file:
 
 logger = logging.getLogger(__name__)
 logging.getLogger("discord").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_client").setLevel(logging.DEBUG)
+
+
+class _SuppressUnclosedConnectionFilter(logging.Filter):
+    """Suppress asyncio 'Unclosed connection' noise from py-cord voice retries."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "Unclosed connection" in msg and "client_connection" in msg:
+            return False
+        return True
+
+
+logging.getLogger("asyncio").addFilter(_SuppressUnclosedConnectionFilter())
+
+
+def _patch_voice_client_shutdown() -> None:
+    """
+    Avoid 'Task exception was never retrieved' on shutdown: when the bot closes,
+    VoiceClient.disconnect() runs cleanup() while poll_voice_ws() may still be
+    running. The library can set self.ws to MISSING, so the next
+    self.ws.poll_event() raises AttributeError. Patch poll_voice_ws to exit
+    cleanly in that case.
+    """
+    try:
+        VoiceClient = discord.voice_client.VoiceClient
+        _orig_poll_voice_ws = VoiceClient.poll_voice_ws
+
+        async def _patched_poll_voice_ws(self, reconnect: bool) -> None:
+            try:
+                await _orig_poll_voice_ws(self, reconnect)
+            except AttributeError as e:
+                if "poll_event" in str(e):
+                    return
+                raise
+
+        VoiceClient.poll_voice_ws = _patched_poll_voice_ws
+        logger.debug("VoiceClient.poll_voice_ws shutdown patch applied")
+    except Exception as e:
+        logger.warning("Could not patch VoiceClient for clean shutdown: %s", e)
+
+
+_patch_voice_client_shutdown()
 
 
 class _SuppressOpusDecodeFilter(logging.Filter):
@@ -60,21 +113,6 @@ class _SuppressOpusDecodeFilter(logging.Filter):
 
 
 logging.getLogger().addFilter(_SuppressOpusDecodeFilter())
-
-
-def _memory_mb():
-    """Return current process RSS in MB, or None if unavailable."""
-    try:
-        return psutil.Process().memory_info().rss / (1024 * 1024)
-    except Exception:
-        return None
-
-
-def _log_memory(stage: str):
-    """Log diagnostic memory usage at the given stage."""
-    mb = _memory_mb()
-    if mb is not None:
-        logger.info("Memory [%s]: %.1f MB RSS", stage, mb)
 
 
 def build_transcript_lines(phrases: list[dict]) -> str:
@@ -119,7 +157,6 @@ def _load_opus() -> None:
 
 
 _load_opus()
-_log_memory("after_opus")
 
 _whisper_model = os.getenv("WHISPER_MODEL", "turbo")
 _whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
@@ -128,7 +165,6 @@ logger.info("Loading Whisper model (%s)...", _whisper_model)
 model = WhisperModel(_whisper_model, device=_whisper_device, compute_type=_whisper_compute)
 logger.info("Whisper ready")
 logger.info("Temp dir (cleared after each transcription): %s", _watson_temp_dir)
-_log_memory("after_whisper_load")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -216,7 +252,6 @@ async def on_ready() -> None:
         bot.user.id,
         len(bot.guilds),
     )
-    _log_memory("on_ready")
     for guild in bot.guilds:
         logger.info("  Guild: %s (ID: %s)", guild.name, guild.id)
 
@@ -292,9 +327,64 @@ async def join(ctx) -> None:
         return await ctx.send("I'm already in a channel! 🎙")
     if ctx.author.voice:
         ch = ctx.author.voice.channel
-        await ch.connect()
-        logger.info("Joined voice channel %s (guild %s)", ch.name, ctx.guild.id)
-        await ctx.send("🎩 Joined. Ready.")
+        logger.info(
+            "Attempting voice connect: guild=%s, channel=%s (id=%s, bitrate=%s, user_limit=%s)",
+            ctx.guild.id,
+            ch.name,
+            ch.id,
+            getattr(ch, "bitrate", None),
+            getattr(ch, "user_limit", None),
+        )
+        try:
+            # Run connect() in a task so we can cancel if user does !leave during retries.
+            connect_task = asyncio.create_task(ch.connect(timeout=90.0, reconnect=True))
+            while not connect_task.done():
+                await asyncio.sleep(0.25)
+                # Only cancel if the client was removed from state (e.g. user did !leave).
+                # Do not use is_connected(): it stays False until handshake completes.
+                if ctx.guild.voice_client is None:
+                    connect_task.cancel()
+                    try:
+                        await connect_task
+                    except asyncio.CancelledError:
+                        pass
+                    return await ctx.send("Left before connection finished.")
+            await connect_task
+            vc = ctx.guild.voice_client
+            logger.info(
+                "Joined voice channel %s (id=%s) in guild %s, voice_client=%r, ws=%r",
+                ch.name,
+                ch.id,
+                ctx.guild.id,
+                vc,
+                getattr(vc, "ws", None) if vc else None,
+            )
+            await ctx.send("🎩 Joined. Ready.")
+        except asyncio.CancelledError:
+            pass
+        except discord.errors.ConnectionClosed as e:
+            logger.exception(
+                "Voice websocket closed during connect (guild=%s, channel=%s, code=%s): %s",
+                ctx.guild.id,
+                ch.id,
+                getattr(e, "code", None),
+                e,
+            )
+            await ctx.send(
+                "⚠️ Could not connect to voice (ConnectionClosed from Discord). "
+                "Check bot logs for details."
+            )
+        except Exception as e:
+            logger.exception(
+                "Unexpected error during voice connect (guild=%s, channel=%s): %s",
+                ctx.guild.id,
+                ch.id,
+                e,
+            )
+            await ctx.send(
+                "⚠️ Could not connect to voice (unexpected error). "
+                "Check bot logs for details."
+            )
     else:
         logger.debug("Rejected: author not in voice channel")
         await ctx.send("Join a voice channel first.")
@@ -485,7 +575,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
 
     transcribing_guilds.add(guild_id)
     logger.debug("Added guild %s to transcribing_guilds", guild_id)
-    _log_memory("transcription_start")
     status_msg = await channel.send("⚙️ **Watson is processing audio...**")
 
     all_phrases = []
@@ -538,7 +627,6 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
                 await asyncio.sleep(0)
                 num_segments = len(segments_list)
                 logger.info("Transcribed user %s: %d segments", user_id, num_segments)
-                _log_memory("after_transcribe_user_%s" % user_id)
 
                 user_obj = bot.get_user(user_id)
                 username = user_obj.display_name if user_obj else f"User {user_id}"
@@ -636,27 +724,18 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
         transcribing_guilds.discard(guild_id)
         logger.debug("Removed guild %s from transcribing_guilds", guild_id)
         if os.path.isdir(temp_guild_dir):
-            def _rmtree() -> None:
-                try:
-                    shutil.rmtree(temp_guild_dir)
-                except OSError as e:
-                    logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
             try:
-                await asyncio.to_thread(_rmtree)
-            except Exception:
-                _rmtree()
+                await asyncio.to_thread(shutil.rmtree, temp_guild_dir)
+            except OSError as e:
+                logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
         del sink
         await asyncio.to_thread(gc.collect)
-        _log_memory("transcription_done")
         logger.info(
             "Session finished for guild %s (%s), saved %d recording(s)",
             guild_id,
             guild_name,
             len(temp_files),
         )
-
-
-SHUTDOWN_WAIT_TRANSCRIPTION_SEC = 300
 
 
 def _create_bot() -> commands.Bot:
@@ -672,59 +751,21 @@ def _create_bot() -> commands.Bot:
     return b
 
 
-async def _run_bot_with_graceful_shutdown(token: str) -> None:
-    """
-    Run the bot until SIGTERM/SIGINT; then wait for active transcriptions
-    (up to SHUTDOWN_WAIT_TRANSCRIPTION_SEC), close the Discord connection, and exit.
-    """
-    global bot
-    bot = _create_bot()
-
-    shutdown_ev = asyncio.Event()
-
-    def _on_signal() -> None:
-        shutdown_ev.set()
-
-    try:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(
-                sig, _on_signal
-            )
-    except NotImplementedError:
-        signal.signal(signal.SIGTERM, lambda s, f: _on_signal())
-        signal.signal(signal.SIGINT, lambda s, f: _on_signal())
-
-    bot_task = asyncio.create_task(bot.start(token))
-    await shutdown_ev.wait()
-    logger.info("Shutdown requested, waiting for active transcriptions...")
-    deadline = time.monotonic() + SHUTDOWN_WAIT_TRANSCRIPTION_SEC
-    while transcribing_guilds and time.monotonic() < deadline:
-        await asyncio.sleep(1)
-    if transcribing_guilds:
-        logger.warning(
-            "Shutdown timeout, %d guild(s) still transcribing",
-            len(transcribing_guilds),
-        )
-    await bot.close()
-    try:
-        await asyncio.wait_for(bot_task, timeout=10.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        pass
-    logger.info("Bot stopped.")
-
-
 def _main() -> None:
-    """Entry point: check token, then run bot with graceful shutdown."""
+    """Entry point: check token, then run bot directly."""
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         logger.error("DISCORD_TOKEN not found in .env")
         sys.exit("Set DISCORD_TOKEN in .env (see .env.example)")
+
+    global bot
+    bot = _create_bot()
+
     logger.info("Starting bot...")
     try:
-        asyncio.run(_run_bot_with_graceful_shutdown(token))
+        bot.run(token)
     except KeyboardInterrupt:
-        pass
+        logger.info("KeyboardInterrupt received, shutting down.")
 
 
 if __name__ == "__main__":
