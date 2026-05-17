@@ -1,0 +1,1 @@
+"""Watson Discord bot package."""

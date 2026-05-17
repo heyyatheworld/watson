@@ -11,7 +11,7 @@ Discord bot that records voice channel audio, transcribes it with [faster-whispe
 - **Saved files** — WAV and transcript `.txt` are written to a recordings directory (configurable). The bot does **not** post transcript text in the channel, only a recap (if Ollama is on) and paths to the saved files.
 - **Ollama recap** — Optional short summary (200–300 chars) after each recording: what was discussed, decisions, who’s responsible. In the same language as the dialogue. Prompt is in `prompts/recap.txt`.
 - **Auto-stop** — When the last human **leaves** the voice channel, recording stops and processing runs. Mute/deafen in the same channel is ignored (bot does not leave).
-- **Config** — All settings via `.env` (prefix, temp/recordings dirs, Whisper, Ollama, recap prompt path). See `.env.example`.
+- **Config** — All settings via `.env` (prefix, temp/recordings dirs, Whisper, Ollama, recap prompt path). Optional `WATSON_FORCE_IPV4` if voice fails on broken IPv6. See `.env.example`.
 
 ## Prerequisites
 
@@ -116,6 +116,7 @@ volumes:
 
 - **Bot left when I muted** — Fixed: the bot only leaves when someone actually leaves the channel; mute/deafen in the same channel is ignored.
 - **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; prefer smaller Whisper models if needed.
+- **Voice works better over IPv4** — Some networks break Discord UDP over IPv6; set `WATSON_FORCE_IPV4=1` in `.env`.
 - **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
 - **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.
 - **Bot doesn’t respond** — Enable **Message Content Intent** (and **Server Members Intent**) in the Developer Portal.

@@ -3,18 +3,17 @@ Discord bot: record voice channel audio, transcribe with faster-whisper,
 optionally summarize with Ollama. Saves WAV and transcript to disk; posts recap and file links.
 """
 
-import socket
+from dotenv import load_dotenv
 
-_orig_getaddrinfo = socket.getaddrinfo
+load_dotenv()
 
+from watson.discord_patches import (
+    SuppressOpusDecodeFilter,
+    maybe_apply_ipv4_resolver_patch,
+    setup_discord_voice_patches,
+)
 
-def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    if family in (0, socket.AF_UNSPEC):
-        family = socket.AF_INET
-    return _orig_getaddrinfo(host, port, family, type, proto, flags)
-
-
-socket.getaddrinfo = _ipv4_only_getaddrinfo
+maybe_apply_ipv4_resolver_patch()
 
 import asyncio
 import gc
@@ -29,10 +28,7 @@ from datetime import datetime, timezone
 import discord
 import ollama
 from discord.ext import commands
-from dotenv import load_dotenv
 from faster_whisper import WhisperModel
-
-load_dotenv()
 
 _watson_temp_dir = os.getenv("WATSON_TEMP_DIR") or "./temp"
 os.makedirs(_watson_temp_dir, exist_ok=True)
@@ -66,54 +62,9 @@ class _SuppressUnclosedConnectionFilter(logging.Filter):
 
 logging.getLogger("asyncio").addFilter(_SuppressUnclosedConnectionFilter())
 
+logging.getLogger().addFilter(SuppressOpusDecodeFilter())
 
-def _patch_voice_client_shutdown() -> None:
-    """
-    Avoid 'Task exception was never retrieved' on shutdown: when the bot closes,
-    VoiceClient.disconnect() runs cleanup() while poll_voice_ws() may still be
-    running. The library can set self.ws to MISSING, so the next
-    self.ws.poll_event() raises AttributeError. Patch poll_voice_ws to exit
-    cleanly in that case.
-    """
-    try:
-        VoiceClient = discord.voice_client.VoiceClient
-        _orig_poll_voice_ws = VoiceClient.poll_voice_ws
-
-        async def _patched_poll_voice_ws(self, reconnect: bool) -> None:
-            try:
-                await _orig_poll_voice_ws(self, reconnect)
-            except AttributeError as e:
-                if "poll_event" in str(e):
-                    return
-                raise
-
-        VoiceClient.poll_voice_ws = _patched_poll_voice_ws
-        logger.debug("VoiceClient.poll_voice_ws shutdown patch applied")
-    except Exception as e:
-        logger.warning("Could not patch VoiceClient for clean shutdown: %s", e)
-
-
-_patch_voice_client_shutdown()
-
-
-class _SuppressOpusDecodeFilter(logging.Filter):
-    """Suppress repeated 'Error occurred while decoding opus frame' log records."""
-
-    _last_log_time = 0.0
-    _cooldown_sec = 60.0
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = str(getattr(record, "msg", "")) + str(getattr(record, "args", ()))
-        if "decoding opus frame" not in msg.lower():
-            return True
-        now = time.monotonic()
-        if now - _SuppressOpusDecodeFilter._last_log_time >= _SuppressOpusDecodeFilter._cooldown_sec:
-            _SuppressOpusDecodeFilter._last_log_time = now
-            return True
-        return False
-
-
-logging.getLogger().addFilter(_SuppressOpusDecodeFilter())
+setup_discord_voice_patches(logger)
 
 
 def build_transcript_lines(phrases: list[dict]) -> str:
@@ -124,40 +75,6 @@ def build_transcript_lines(phrases: list[dict]) -> str:
         lines.append(f"[{m:02d}:{s:02d}] **{p['user']}**: {p['text']}\n")
     return "".join(lines)
 
-
-logging.getLogger("discord.voicereader").setLevel(logging.ERROR)
-logging.getLogger("discord.voicereader").propagate = False
-logging.getLogger("discord.opus").setLevel(logging.ERROR)
-
-_OPUS_FALLBACK_PATHS = [
-    "/opt/homebrew/lib/libopus.dylib",
-    "/usr/lib/x86_64-linux-gnu/libopus.so.0",
-    "/usr/lib/aarch64-linux-gnu/libopus.so.0",
-    "libopus.so.0",
-]
-
-
-def _load_opus() -> None:
-    """Load Opus library from OPUS_LIB_PATH or fallback paths. Required for voice."""
-    explicit = os.getenv("OPUS_LIB_PATH")
-    if explicit:
-        paths = [explicit]
-    else:
-        paths = _OPUS_FALLBACK_PATHS
-    for path in paths:
-        try:
-            discord.opus.load_opus(path)
-            logger.info("Opus loaded: %s", path)
-            return
-        except Exception as e:
-            logger.debug("Opus load failed for %s: %s", path, e)
-    logger.warning(
-        "Opus could not be loaded from any path. Voice may fail with decode errors. "
-        "Set OPUS_LIB_PATH to your libopus path (e.g. /opt/homebrew/lib/libopus.dylib on macOS)."
-    )
-
-
-_load_opus()
 
 _whisper_model_name = os.getenv("WHISPER_MODEL", "turbo")
 _whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
