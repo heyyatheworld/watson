@@ -12,7 +12,7 @@ def test_join_handles_discord_voice_4017_connection_closed(main_module):
     (gateway rejects bots whose library cannot complete the handshake). ``!join`` must swallow
     the error and notify the channel like any other ``ConnectionClosed``.
     """
-    async def boom_connect(timeout=90.0, reconnect=True):  # noqa: ARG001
+    async def boom_connect(_timeout=90.0, _reconnect=True):
         raise FakeVoiceConnectionClosed(4017)
 
     ch = MagicMock()

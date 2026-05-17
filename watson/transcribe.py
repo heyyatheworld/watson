@@ -1,4 +1,4 @@
-"""faster-whisper wrapper and transcript formatting."""
+"""Lazy faster-whisper model load and transcript text formatting."""
 
 from __future__ import annotations
 

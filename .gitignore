@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -138,7 +141,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
-.venv-312-check
+.venv-*
 env/
 venv/
 ENV/
