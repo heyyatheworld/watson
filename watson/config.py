@@ -50,6 +50,9 @@ class Settings:
     ollama_retry_delay: float
     ollama_host: str
     skip_env_check: bool
+    lockdown_voice_commands: bool
+    allowed_role_ids: frozenset[int]
+    discord_hide_paths: bool
 
     @property
     def max_recording_seconds(self) -> int:
@@ -89,6 +92,9 @@ def load_settings() -> Settings:
         ollama_retry_delay=2.0,
         ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
         skip_env_check=_truthy("WATSON_SKIP_ENV_CHECK"),
+        lockdown_voice_commands=_truthy("WATSON_LOCKDOWN_VOICE_COMMANDS"),
+        allowed_role_ids=_comma_role_ids("WATSON_ALLOWED_ROLE_IDS"),
+        discord_hide_paths=_truthy("WATSON_DISCORD_HIDE_PATHS"),
     )
 
 

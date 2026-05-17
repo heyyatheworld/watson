@@ -13,6 +13,8 @@ import discord
 from discord.ext import commands
 
 from watson.config import SETTINGS
+from watson.paths import format_saved_paths_for_discord
+from watson.permissions import ensure_voice_operator
 from watson.recap import get_recap_sync
 from watson import state
 from watson.transcribe import build_transcript_lines, get_whisper_model
@@ -102,6 +104,8 @@ async def check(ctx) -> None:
 
 async def join(ctx) -> None:
     """Join the voice channel the author is in."""
+    if not await ensure_voice_operator(ctx):
+        return
     logger.info("!join from %s in guild %s", ctx.author, ctx.guild.id)
     if ctx.voice_client:
         logger.debug("Rejected: already in channel %s", ctx.voice_client.channel.name)
@@ -218,6 +222,8 @@ async def _enforce_recording_limit(guild_id: int, channel_id: int) -> None:
 
 async def record(ctx) -> None:
     """Start recording in the current voice channel."""
+    if not await ensure_voice_operator(ctx):
+        return
     logger.info(
         "!record from %s in guild %s (channel %s)",
         ctx.author,
@@ -250,6 +256,8 @@ async def record(ctx) -> None:
 
 async def stop(ctx) -> None:
     """Stop the current recording and run transcription and recap."""
+    if not await ensure_voice_operator(ctx):
+        return
     logger.info("!stop from %s in guild %s", ctx.author, ctx.guild.id)
     voice = ctx.voice_client
     if voice and voice.recording:
@@ -267,6 +275,8 @@ async def stop(ctx) -> None:
 
 async def leave(ctx) -> None:
     """Leave the current voice channel."""
+    if not await ensure_voice_operator(ctx):
+        return
     logger.info("!leave from %s in guild %s", ctx.author, ctx.guild.id)
     if ctx.voice_client:
         ch_name = ctx.voice_client.channel.name
@@ -417,9 +427,20 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
                     recording_paths.append(dest)
                 except OSError as e:
                     logger.warning("Could not copy %s to %s: %s", temp_path, dest, e)
-            lines = [f"- `{p}`" for p in recording_paths]
+            paths_for_message = list(recording_paths)
+            kinds = ["wav"] * len(recording_paths)
             if os.path.exists(transcript_saved_path):
-                lines.append(f"- `{transcript_saved_path}` (transcript)")
+                paths_for_message.append(transcript_saved_path)
+                kinds.append("transcript")
+            display_paths = format_saved_paths_for_discord(
+                paths_for_message,
+                SETTINGS.recordings_dir,
+                SETTINGS.discord_hide_paths,
+            )
+            lines = []
+            for p, kind in zip(display_paths, kinds):
+                suffix = " (transcript)" if kind == "transcript" else ""
+                lines.append(f"- `{p}`{suffix}")
             if lines:
                 await status_msg.edit(
                     content="✅ **Done.**\n\n"

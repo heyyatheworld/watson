@@ -8,10 +8,10 @@ Discord bot that records voice channel audio, transcribes it with [faster-whispe
 
 - **Voice recording** — Joins a voice channel and records participants (WAV). Max length and “warning before stop” are configurable.
 - **Transcription** — Speech-to-text via faster-whisper (model/device/compute_type in `.env`). Runs in a thread so the bot stays responsive.
-- **Saved files** — WAV and transcript `.txt` are written to a recordings directory (configurable). The bot does **not** post transcript text in the channel, only a recap (if Ollama is on) and paths to the saved files.
+- **Saved files** — WAV and transcript `.txt` are written to a recordings directory (configurable). The bot does **not** post transcript text in the channel, only a recap (if Ollama is on) and safe references to saved files (paths relative to the recordings dir, or basenames only via env).
 - **Ollama recap** — Optional short summary (200–300 chars) after each recording: what was discussed, decisions, who’s responsible. In the same language as the dialogue. Prompt is in `prompts/recap.txt`.
 - **Auto-stop** — When the last human **leaves** the voice channel, recording stops and processing runs. Mute/deafen in the same channel is ignored (bot does not leave).
-- **Config** — All settings via `.env` (prefix, temp/recordings dirs, Whisper, Ollama, recap prompt path). Optional `WATSON_FORCE_IPV4` if voice fails on broken IPv6. See `.env.example`.
+- **Config** — All settings via `.env` (prefix, temp/recordings dirs, Whisper, Ollama, recap prompt path). Optional `WATSON_FORCE_IPV4` if voice fails on broken IPv6; optional `WATSON_LOCKDOWN_VOICE_COMMANDS` and path privacy flags — see `.env.example`.
 
 ## Prerequisites
 
@@ -66,6 +66,8 @@ Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see 
    - `RECORDING_MAX_MINUTES`, `WARNING_BEFORE_STOP_MINUTES`
    - `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `TRANSCRIPT_LANGUAGE`, `TRANSCRIPT_BEAM_SIZE`
    - `OLLAMA_HOST`, `OLLAMA_RECAP_MODEL`, `RECAP_PROMPT_FILE` (recap prompt path)
+   - `WATSON_LOCKDOWN_VOICE_COMMANDS`, `WATSON_ALLOWED_ROLE_IDS` (restrict voice commands on public servers)
+   - `WATSON_DISCORD_HIDE_PATHS` (show only filenames in Discord instead of relative paths)
 
    Bot and invite: [Developer Portal](https://discord.com/developers/applications) → Bot → enable intents → OAuth2 URL Generator (scope **bot**, permissions: View Channels, Connect, Speak, Send Messages, Read Message History, Attach Files).
 
@@ -83,7 +85,9 @@ Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see 
    | `!leave`  | Bot leaves the voice channel |
    | `!check`  | Connection status and bot permissions (embed) |
 
-3. After processing, the bot posts **Done**, then the **recap** (if `OLLAMA_RECAP_MODEL` is set), then **links to files** in the recordings directory (WAV per user, one transcript `.txt`). No full transcript text is sent in the channel.
+3. After processing, the bot posts **Done**, then the **recap** (if `OLLAMA_RECAP_MODEL` is set), then **references to saved files** (relative to your recordings directory by default). No full transcript text is sent in the channel.
+
+For **public servers**, enable `WATSON_LOCKDOWN_VOICE_COMMANDS` so only moderators (Manage Server / Administrator / configured roles) can use `!join`, `!record`, `!stop`, and `!leave`. `!check` stays available for diagnostics.
 
 **Saved transcript file** format: first line = header (date, time, guild name, channel name); blank line; recap (if any); blank line; transcript body.
 
@@ -142,12 +146,16 @@ watson/
 ├── discord_patches.py   # Optional IPv4, Opus, VoiceClient shutdown patch
 ├── env_check.py         # Writable dirs + optional Ollama probe
 ├── handlers.py          # Commands, listeners, recording pipeline
+├── paths.py             # Safe path strings for Discord messages
+├── permissions.py       # Optional lockdown for voice commands
 ├── recap.py             # Ollama recap (blocking helper)
 ├── state.py             # Bot instance + transcribing guild set
 ├── transcribe.py        # Lazy Whisper + transcript formatting
 main.py                  # Entry: dotenv, IPv4 patch, run_bot()
 prompts/
 ├── recap.txt            # Prompt for recap ({{TRANSCRIPT}} placeholder)
+scripts/
+├── discord_voice_smoke.py   # Standalone voice gateway diagnostic
 tests/
 ├── conftest.py          # Mocks for handlers/transcribe imports
 ├── test_main.py         # Helpers, config, command behaviour

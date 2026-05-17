@@ -60,10 +60,12 @@ def main_module():
 
         import watson.config as cfg
         import watson.handlers as handlers
+        import watson.permissions as perm
         import watson.state as st
         import watson.transcribe as tr
 
         importlib.reload(cfg)
+        importlib.reload(perm)
         importlib.reload(tr)
         importlib.reload(handlers)
 
