@@ -28,17 +28,6 @@ def test_build_transcript_lines_multiple(main_module):
     assert "[01:05] **Bob**: Minute one\n" in out
 
 
-def test_memory_mb_returns_float_or_none(main_module):
-    """_memory_mb returns a non-negative float or None."""
-    result = main_module._memory_mb()
-    assert result is None or (isinstance(result, float) and result >= 0)
-
-
-def test_log_memory_does_not_raise(main_module):
-    """_log_memory does not raise for any stage name."""
-    main_module._log_memory("test_stage")
-
-
 def test_recording_limit_config(main_module):
     """MAX_RECORDING_SECONDS is 30 * 60 when env is default."""
     assert main_module.MAX_RECORDING_MINUTES == 30

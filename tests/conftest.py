@@ -1,5 +1,5 @@
 """
-Pytest fixtures: fake discord, faster_whisper, ollama, psutil so main can be
+Pytest fixtures: fake discord, faster_whisper, ollama so main can be
 imported without real connections or model load.
 """
 
@@ -13,7 +13,7 @@ import pytest
 @pytest.fixture(scope="module")
 def main_module():
     """
-    Import main with Discord, faster_whisper, ollama and psutil mocked.
+    Import main with Discord, faster_whisper, and ollama mocked.
     No token or model required.
     """
     fake_discord = MagicMock()
@@ -28,8 +28,6 @@ def main_module():
     fake_ext.commands = fake_commands
     fake_discord.ext = fake_ext
     fake_fw = MagicMock()
-    fake_psutil = MagicMock()
-    fake_psutil.Process.return_value.memory_info.return_value.rss = 100 * 1024 * 1024
     fake_ollama = MagicMock()
 
     with (
@@ -41,7 +39,6 @@ def main_module():
                 "discord.ext.commands": fake_commands,
                 "faster_whisper": fake_fw,
                 "ollama": fake_ollama,
-                "psutil": fake_psutil,
             },
         ),
         patch.dict(
@@ -58,5 +55,6 @@ def main_module():
         patch("os.makedirs", MagicMock()),
     ):
         import main as _main
+
         _main.bot = MagicMock()
         return _main

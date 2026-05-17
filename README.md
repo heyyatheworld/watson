@@ -45,7 +45,7 @@ Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see 
    pip install -r requirements.txt
    ```
 
-   Main deps: `py-cord`, `faster-whisper`, `ollama`, `python-dotenv`, `psutil`.
+   Main deps: `py-cord`, `faster-whisper`, `ollama`, `python-dotenv`, `aiohttp`.
 
 3. **Configure**
 
@@ -115,7 +115,7 @@ volumes:
 ## Troubleshooting
 
 - **Bot left when I muted** — Fixed: the bot only leaves when someone actually leaves the channel; mute/deafen in the same channel is ignored.
-- **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; bot logs RSS at key stages.
+- **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; prefer smaller Whisper models if needed.
 - **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
 - **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.
 - **Bot doesn’t respond** — Enable **Message Content Intent** (and **Server Members Intent**) in the Developer Portal.
