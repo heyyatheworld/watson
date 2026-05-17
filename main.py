@@ -20,6 +20,7 @@ import asyncio
 import gc
 import logging
 import os
+import threading
 import shutil
 import sys
 import time
@@ -158,12 +159,29 @@ def _load_opus() -> None:
 
 _load_opus()
 
-_whisper_model = os.getenv("WHISPER_MODEL", "turbo")
+_whisper_model_name = os.getenv("WHISPER_MODEL", "turbo")
 _whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper_compute = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
-logger.info("Loading Whisper model (%s)...", _whisper_model)
-model = WhisperModel(_whisper_model, device=_whisper_device, compute_type=_whisper_compute)
-logger.info("Whisper ready")
+_whisper_model_instance = None
+_whisper_model_lock = threading.Lock()
+
+
+def get_whisper_model() -> WhisperModel:
+    """Load faster-whisper once on first transcription (avoids heavy import-time startup)."""
+    global _whisper_model_instance
+    if _whisper_model_instance is None:
+        with _whisper_model_lock:
+            if _whisper_model_instance is None:
+                logger.info("Loading Whisper model (%s)...", _whisper_model_name)
+                _whisper_model_instance = WhisperModel(
+                    _whisper_model_name,
+                    device=_whisper_device,
+                    compute_type=_whisper_compute,
+                )
+                logger.info("Whisper ready")
+    return _whisper_model_instance
+
+
 logger.info("Temp dir (cleared after each transcription): %s", _watson_temp_dir)
 
 intents = discord.Intents.default()
@@ -616,7 +634,8 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
 
                 def _transcribe(path: str):
                     """Run Whisper on path; return list of segments."""
-                    segments_iter, _ = model.transcribe(
+                    whisper = get_whisper_model()
+                    segments_iter, _ = whisper.transcribe(
                         path,
                         beam_size=TRANSCRIPT_BEAM_SIZE,
                         language=TRANSCRIPT_LANGUAGE,
