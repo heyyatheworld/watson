@@ -1,10 +1,11 @@
 """
-Pytest fixtures: fake discord, faster_whisper, ollama so main can be
-imported without real connections or model load.
+Pytest fixtures: fake discord, faster_whisper, ollama so bot logic can import
+without real connections or loading Whisper weights.
 """
 
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,17 +14,19 @@ import pytest
 @pytest.fixture(scope="module")
 def main_module():
     """
-    Import main with Discord, faster_whisper, and ollama mocked.
-    No token or model required.
+    watson.handlers + watson.transcribe with mocked Discord stack.
+    Reloads config after patching env so SETTINGS reflects test defaults.
     """
     fake_discord = MagicMock()
     fake_discord.opus.load_opus = MagicMock()
+    fake_discord.errors.ConnectionClosed = Exception
+    fake_discord.sinks.WaveSink = MagicMock
     fake_ext = MagicMock()
     fake_commands = MagicMock()
     fake_bot = MagicMock()
     fake_bot.run = MagicMock()
-    fake_bot.command = lambda: (lambda fn: fn)  # @bot.command() returns decorator that returns fn
-    fake_bot.event = lambda fn: fn  # @bot.event returns the function unchanged
+    fake_bot.command = lambda: (lambda fn: fn)
+    fake_bot.event = lambda fn: fn
     fake_commands.Bot = MagicMock(return_value=fake_bot)
     fake_ext.commands = fake_commands
     fake_discord.ext = fake_ext
@@ -50,11 +53,27 @@ def main_module():
             },
             clear=False,
         ),
-        patch("dotenv.load_dotenv", MagicMock()),
         patch("tempfile.gettempdir", return_value="/tmp"),
         patch("os.makedirs", MagicMock()),
     ):
-        import main as _main
+        import importlib
 
-        _main.bot = MagicMock()
-        return _main
+        import watson.config as cfg
+        import watson.handlers as handlers
+        import watson.state as st
+        import watson.transcribe as tr
+
+        importlib.reload(cfg)
+        importlib.reload(tr)
+        importlib.reload(handlers)
+
+        st.bot = MagicMock()
+        st.transcribing_guilds.clear()
+
+        return SimpleNamespace(
+            build_transcript_lines=tr.build_transcript_lines,
+            record=handlers.record,
+            transcribing_guilds=st.transcribing_guilds,
+            MAX_RECORDING_MINUTES=cfg.SETTINGS.max_recording_minutes,
+            MAX_RECORDING_SECONDS=cfg.SETTINGS.max_recording_seconds,
+        )

@@ -135,19 +135,28 @@ See `tests/README.md` for testing concurrent recordings (mocks and manual).
 ## Project structure
 
 ```
-Watson/
-├── main.py              # Bot, recording, Whisper, Ollama recap
-├── prompts/
-│   └── recap.txt        # Prompt for recap ({{TRANSCRIPT}} placeholder)
-├── tests/
-│   ├── conftest.py      # Mocks for import without Discord/Whisper
-│   ├── test_main.py     # Helpers, config, command behaviour
-│   └── README.md        # How to test concurrent recordings
-├── Dockerfile           # Bot image (Ollama is separate in compose)
-├── docker-compose.yml   # watson-bot + ollama, volume mounts
-├── .env.example        # Env template
-├── requirements.txt
-└── README.md
+watson/
+├── __init__.py
+├── bootstrap.py         # Logging, dirs, env check, bot.run
+├── config.py            # Env-backed Settings
+├── discord_patches.py   # Optional IPv4, Opus, VoiceClient shutdown patch
+├── env_check.py         # Writable dirs + optional Ollama probe
+├── handlers.py          # Commands, listeners, recording pipeline
+├── recap.py             # Ollama recap (blocking helper)
+├── state.py             # Bot instance + transcribing guild set
+├── transcribe.py        # Lazy Whisper + transcript formatting
+main.py                  # Entry: dotenv, IPv4 patch, run_bot()
+prompts/
+├── recap.txt            # Prompt for recap ({{TRANSCRIPT}} placeholder)
+tests/
+├── conftest.py          # Mocks for handlers/transcribe imports
+├── test_main.py         # Helpers, config, command behaviour
+└── README.md            # Concurrent recording notes
+Dockerfile
+docker-compose.yml
+.env.example
+requirements.txt
+README.md
 ```
 
 ## License
