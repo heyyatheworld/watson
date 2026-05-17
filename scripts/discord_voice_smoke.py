@@ -85,7 +85,10 @@ async def join(ctx):
         if e.code == 4006:
             print("Hint: invalid session — reset bot token in Developer Portal")
         elif e.code == 4017:
-            print("Hint: UDP / encryption — check PyNaCl, firewall, try WATSON_FORCE_IPV4 on main bot")
+            print(
+                "Hint: 4017 = DAVE mandatory voice E2EE failed (Discord rejects handshake)."
+                " Py-cord/Dave support is upstream-dependent; see pycord#3135 and Discord dave-protocol."
+            )
     except Exception as e:
         print(f"Error: {type(e).__name__}: {e}")
         raise

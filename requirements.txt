@@ -1,4 +1,4 @@
-py-cord==2.7.1
+py-cord==2.8.0rc2
 pynacl==1.6.2
 
 faster-whisper==1.2.1

@@ -15,7 +15,7 @@ Discord bot that records voice channel audio, transcribes it with [faster-whispe
 
 ## Prerequisites
 
-- Python 3.10+
+- Python **3.10–3.13** (`py-cord` 2.8.x RC wheels do not declare support for 3.14 yet; use 3.12 for local dev if your system Python is newer).
 - [Discord bot token](https://discord.com/developers/applications) — create an application and bot; enable **Message Content Intent** and **Server Members Intent**
 - **macOS (Homebrew):** Opus from `/opt/homebrew/lib/libopus.dylib` (or set `OPUS_LIB_PATH` in `.env`)
 
@@ -45,7 +45,7 @@ Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see 
    pip install -r requirements.txt
    ```
 
-   Main deps: `py-cord`, `faster-whisper`, `ollama`, `python-dotenv`, `aiohttp`.
+   Main deps: **py-cord 2.8.0rc2** (2.8.x prerelease on PyPI with ongoing DAVE/voice fixes — pin to stable `py-cord==2.8.0` when it appears), `faster-whisper`, `ollama`, `python-dotenv`, `aiohttp`.
 
 3. **Configure**
 
@@ -122,6 +122,7 @@ volumes:
 - **Bot left when I muted** — Fixed: the bot only leaves when someone actually leaves the channel; mute/deafen in the same channel is ignored.
 - **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; prefer smaller Whisper models if needed.
 - **Voice works better over IPv4** — Some networks break Discord UDP over IPv6; set `WATSON_FORCE_IPV4=1` in `.env`.
+- **Voice `4017` / DAVE (E2EE)** — If Discord closes the voice websocket with **`ConnectionClosed` code `4017`**, the gateway rejected the handshake because **[DAVE](https://github.com/discord/dave-protocol)** (mandatory Discord voice end‑to‑end encryption) negotiation failed. **Py-cord may not yet satisfy DAVE** on your shards; Watson only surfaces the failure in chat/logs — **fix requires a Py-cord release with DAVE‑compatible voice** (or another supported client). See [pycord#3135](https://github.com/Pycord-Development/pycord/issues/3135).
 - **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
 - **Heavy load from multiple guilds** — Default `WATSON_MAX_CONCURRENT_TRANSCRIPTIONS=1` serializes Whisper work across servers; increase only if CPU/GPU allows.
 - **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.

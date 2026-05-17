@@ -168,6 +168,12 @@ async def join(ctx) -> None:
                 getattr(e, "code", None),
                 e,
             )
+            if getattr(e, "code", None) == 4017:
+                logger.warning(
+                    "Voice close code 4017: DAVE (Discord mandatory E2EE for voice) validation "
+                    "failed — Discord rejected the handshake; upgrading Py-cord to a "
+                    "DAVE-compatible release is required once available (not fixable inside Watson)."
+                )
             await ctx.send(
                 "⚠️ Could not connect to voice (ConnectionClosed from Discord). "
                 "Check bot logs for details."

@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.discord_voice_stubs import FakeVoiceConnectionClosed
+
 
 @pytest.fixture(scope="module")
 def main_module():
@@ -19,7 +21,7 @@ def main_module():
     """
     fake_discord = MagicMock()
     fake_discord.opus.load_opus = MagicMock()
-    fake_discord.errors.ConnectionClosed = Exception
+    fake_discord.errors.ConnectionClosed = FakeVoiceConnectionClosed
     fake_discord.sinks.WaveSink = MagicMock
     fake_ext = MagicMock()
     fake_commands = MagicMock()
@@ -74,6 +76,7 @@ def main_module():
 
         return SimpleNamespace(
             build_transcript_lines=tr.build_transcript_lines,
+            join=handlers.join,
             record=handlers.record,
             transcribing_guilds=st.transcribing_guilds,
             MAX_RECORDING_MINUTES=cfg.SETTINGS.max_recording_minutes,
