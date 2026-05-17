@@ -21,6 +21,22 @@ from watson.transcribe import build_transcript_lines, get_whisper_model
 
 logger = logging.getLogger(__name__)
 
+_whisper_jobs_semaphore: asyncio.Semaphore | None = None
+
+
+def _whisper_jobs_slot_limiter() -> asyncio.Semaphore:
+    """Bound concurrent Whisper pipelines across all guilds (lazy singleton)."""
+    global _whisper_jobs_semaphore
+    if _whisper_jobs_semaphore is None:
+        n = SETTINGS.max_concurrent_transcriptions
+        _whisper_jobs_semaphore = asyncio.Semaphore(n)
+        logger.info(
+            "Transcription concurrency limit: %d (WATSON_MAX_CONCURRENT_TRANSCRIPTIONS)",
+            n,
+        )
+    return _whisper_jobs_semaphore
+
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -315,171 +331,175 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args) ->
     logger.debug("Added guild %s to transcribing_guilds", guild_id)
     status_msg = await channel.send("⚙️ **Watson is processing audio...**")
 
-    all_phrases = []
-    junk_phrases = SETTINGS.transcript_junk_phrases
-    temp_files = []
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    safe_guild = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name)
-    safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name)
-    temp_guild_dir = os.path.join(SETTINGS.temp_dir, str(guild_id))
-    os.makedirs(temp_guild_dir, exist_ok=True)
-
-    try:
-        for user_id, audio in sink.audio_data.items():
-            temp_path = os.path.join(temp_guild_dir, f"temp_{user_id}.wav")
-
-            audio.file.seek(0)
-            data = audio.file.read()
-            data_len = len(data)
-
-            if data_len < 2000:
-                logger.debug(
-                    "Skipping user %s: audio too short (%d bytes)", user_id, data_len
-                )
-                continue
-
-            with open(temp_path, "wb") as f:
-                f.write(data)
-            logger.debug(
-                "Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id
-            )
-            temp_files.append((temp_path, user_id))
-            await asyncio.sleep(0)
+    async def _run_transcription_pipeline() -> None:
+            all_phrases = []
+            junk_phrases = SETTINGS.transcript_junk_phrases
+            temp_files = []
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            safe_guild = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in guild_name)
+            safe_channel = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in channel.name)
+            temp_guild_dir = os.path.join(SETTINGS.temp_dir, str(guild_id))
+            os.makedirs(temp_guild_dir, exist_ok=True)
 
             try:
+                for user_id, audio in sink.audio_data.items():
+                    temp_path = os.path.join(temp_guild_dir, f"temp_{user_id}.wav")
 
-                def _transcribe(path: str):
-                    whisper = get_whisper_model()
-                    segments_iter, _ = whisper.transcribe(
-                        path,
-                        beam_size=SETTINGS.transcript_beam_size,
-                        language=SETTINGS.transcript_language,
-                    )
-                    return list(segments_iter)
+                    audio.file.seek(0)
+                    data = audio.file.read()
+                    data_len = len(data)
 
-                segments_list = await asyncio.to_thread(_transcribe, temp_path)
-                await asyncio.sleep(0)
-                num_segments = len(segments_list)
-                logger.info("Transcribed user %s: %d segments", user_id, num_segments)
-
-                user_obj = state.bot.get_user(user_id)
-                username = user_obj.display_name if user_obj else f"User {user_id}"
-
-                for seg in segments_list:
-                    text = (seg.text or "").strip()
-                    if (
-                        not any(junk in text.lower() for junk in junk_phrases)
-                        and len(text) > 1
-                    ):
-                        all_phrases.append(
-                            {"time": seg.start, "user": username, "text": text}
+                    if data_len < 2000:
+                        logger.debug(
+                            "Skipping user %s: audio too short (%d bytes)", user_id, data_len
                         )
-                del segments_list
-            except Exception as e:
-                logger.exception("Whisper error for user %s: %s", user_id, e)
+                        continue
 
-        all_phrases.sort(key=lambda x: x["time"])
-        logger.debug("Collected %d phrases", len(all_phrases))
+                    with open(temp_path, "wb") as f:
+                        f.write(data)
+                    logger.debug(
+                        "Saved to temp %s (%d bytes), user %s", temp_path, data_len, user_id
+                    )
+                    temp_files.append((temp_path, user_id))
+                    await asyncio.sleep(0)
 
-        raw_transcript = build_transcript_lines(all_phrases)
+                    try:
 
-        if not raw_transcript:
-            logger.info("No speech recognized for guild %s", guild_id)
-            await status_msg.edit(content="😶 Could not recognize any speech.")
-            return
+                        def _transcribe(path: str):
+                            whisper = get_whisper_model()
+                            segments_iter, _ = whisper.transcribe(
+                                path,
+                                beam_size=SETTINGS.transcript_beam_size,
+                                language=SETTINGS.transcript_language,
+                            )
+                            return list(segments_iter)
 
-        transcript_plain = raw_transcript.replace("**", "")
+                        segments_list = await asyncio.to_thread(_transcribe, temp_path)
+                        await asyncio.sleep(0)
+                        num_segments = len(segments_list)
+                        logger.info("Transcribed user %s: %d segments", user_id, num_segments)
 
-        await asyncio.sleep(0)
-        recap = None
-        if SETTINGS.ollama_recap_model:
-            recap = await asyncio.to_thread(get_recap_sync, transcript_plain, SETTINGS, logger)
-            await asyncio.sleep(0)
-        recap_block = (recap + "\n\n") if recap else ""
+                        user_obj = state.bot.get_user(user_id)
+                        username = user_obj.display_name if user_obj else f"User {user_id}"
 
-        transcript_saved_path = os.path.join(
-            SETTINGS.recordings_dir,
-            f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
-        )
-        date_str = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-        time_str = f"{timestamp[9:11]}:{timestamp[11:13]}:{timestamp[13:15]}"
-        transcript_header = f"{date_str} {time_str} — {guild_name} — {channel.name}"
-        file_content = transcript_header + "\n\n"
-        if recap:
-            file_content += recap + "\n\n"
-        file_content += transcript_plain
-        try:
-            with open(transcript_saved_path, "w", encoding="utf-8") as f:
-                f.write(file_content)
-            logger.debug("Saved transcript to %s", transcript_saved_path)
-        except OSError as e:
-            logger.warning(
-                "Could not save transcript to %s: %s", transcript_saved_path, e
-            )
+                        for seg in segments_list:
+                            text = (seg.text or "").strip()
+                            if (
+                                not any(junk in text.lower() for junk in junk_phrases)
+                                and len(text) > 1
+                            ):
+                                all_phrases.append(
+                                    {"time": seg.start, "user": username, "text": text}
+                                )
+                        del segments_list
+                    except Exception as e:
+                        logger.exception("Whisper error for user %s: %s", user_id, e)
 
-        try:
-            recording_paths = []
-            for temp_path, user_id in temp_files:
-                file_name = f"{timestamp}-{safe_guild}-{safe_channel}-user{user_id}.wav"
-                dest = os.path.join(SETTINGS.recordings_dir, file_name)
+                all_phrases.sort(key=lambda x: x["time"])
+                logger.debug("Collected %d phrases", len(all_phrases))
+
+                raw_transcript = build_transcript_lines(all_phrases)
+
+                if not raw_transcript:
+                    logger.info("No speech recognized for guild %s", guild_id)
+                    await status_msg.edit(content="😶 Could not recognize any speech.")
+                    return
+
+                transcript_plain = raw_transcript.replace("**", "")
+
+                await asyncio.sleep(0)
+                recap = None
+                if SETTINGS.ollama_recap_model:
+                    recap = await asyncio.to_thread(get_recap_sync, transcript_plain, SETTINGS, logger)
+                    await asyncio.sleep(0)
+                recap_block = (recap + "\n\n") if recap else ""
+
+                transcript_saved_path = os.path.join(
+                    SETTINGS.recordings_dir,
+                    f"{timestamp}-{safe_guild}-{safe_channel}-transcript.txt",
+                )
+                date_str = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+                time_str = f"{timestamp[9:11]}:{timestamp[11:13]}:{timestamp[13:15]}"
+                transcript_header = f"{date_str} {time_str} — {guild_name} — {channel.name}"
+                file_content = transcript_header + "\n\n"
+                if recap:
+                    file_content += recap + "\n\n"
+                file_content += transcript_plain
                 try:
-                    shutil.copy2(temp_path, dest)
-                    recording_paths.append(dest)
+                    with open(transcript_saved_path, "w", encoding="utf-8") as f:
+                        f.write(file_content)
+                    logger.debug("Saved transcript to %s", transcript_saved_path)
                 except OSError as e:
-                    logger.warning("Could not copy %s to %s: %s", temp_path, dest, e)
-            paths_for_message = list(recording_paths)
-            kinds = ["wav"] * len(recording_paths)
-            if os.path.exists(transcript_saved_path):
-                paths_for_message.append(transcript_saved_path)
-                kinds.append("transcript")
-            display_paths = format_saved_paths_for_discord(
-                paths_for_message,
-                SETTINGS.recordings_dir,
-                SETTINGS.discord_hide_paths,
-            )
-            lines = []
-            for p, kind in zip(display_paths, kinds):
-                suffix = " (transcript)" if kind == "transcript" else ""
-                lines.append(f"- `{p}`{suffix}")
-            if lines:
-                await status_msg.edit(
-                    content="✅ **Done.**\n\n"
-                    + recap_block
-                    + "📁 Saved to recordings:\n"
-                    + "\n".join(lines)
-                )
-            else:
-                await status_msg.edit(
-                    content="✅ **Done.**\n\n" + recap_block + "(no files saved)"
-                )
-        except discord.DiscordException as e:
-            logger.exception(
-                "Failed to send message to channel (guild %s): %s", guild_id, e
-            )
-            try:
-                await channel.send(
-                    "⚠️ Processing finished but failed to post. Check bot permissions and logs."
-                )
-            except discord.DiscordException:
-                pass
+                    logger.warning(
+                        "Could not save transcript to %s: %s", transcript_saved_path, e
+                    )
 
-    finally:
-        state.transcribing_guilds.discard(guild_id)
-        logger.debug("Removed guild %s from transcribing_guilds", guild_id)
-        if os.path.isdir(temp_guild_dir):
-            try:
-                await asyncio.to_thread(shutil.rmtree, temp_guild_dir)
-            except OSError as e:
-                logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
-        del sink
-        await asyncio.to_thread(gc.collect)
-        logger.info(
-            "Session finished for guild %s (%s), saved %d recording(s)",
-            guild_id,
-            guild_name,
-            len(temp_files),
-        )
+                try:
+                    recording_paths = []
+                    for temp_path, user_id in temp_files:
+                        file_name = f"{timestamp}-{safe_guild}-{safe_channel}-user{user_id}.wav"
+                        dest = os.path.join(SETTINGS.recordings_dir, file_name)
+                        try:
+                            shutil.copy2(temp_path, dest)
+                            recording_paths.append(dest)
+                        except OSError as e:
+                            logger.warning("Could not copy %s to %s: %s", temp_path, dest, e)
+                    paths_for_message = list(recording_paths)
+                    kinds = ["wav"] * len(recording_paths)
+                    if os.path.exists(transcript_saved_path):
+                        paths_for_message.append(transcript_saved_path)
+                        kinds.append("transcript")
+                    display_paths = format_saved_paths_for_discord(
+                        paths_for_message,
+                        SETTINGS.recordings_dir,
+                        SETTINGS.discord_hide_paths,
+                    )
+                    lines = []
+                    for p, kind in zip(display_paths, kinds):
+                        suffix = " (transcript)" if kind == "transcript" else ""
+                        lines.append(f"- `{p}`{suffix}")
+                    if lines:
+                        await status_msg.edit(
+                            content="✅ **Done.**\n\n"
+                            + recap_block
+                            + "📁 Saved to recordings:\n"
+                            + "\n".join(lines)
+                        )
+                    else:
+                        await status_msg.edit(
+                            content="✅ **Done.**\n\n" + recap_block + "(no files saved)"
+                        )
+                except discord.DiscordException as e:
+                    logger.exception(
+                        "Failed to send message to channel (guild %s): %s", guild_id, e
+                    )
+                    try:
+                        await channel.send(
+                            "⚠️ Processing finished but failed to post. Check bot permissions and logs."
+                        )
+                    except discord.DiscordException:
+                        pass
 
+            finally:
+                state.transcribing_guilds.discard(guild_id)
+                logger.debug("Removed guild %s from transcribing_guilds", guild_id)
+                if os.path.isdir(temp_guild_dir):
+                    try:
+                        await asyncio.to_thread(shutil.rmtree, temp_guild_dir)
+                    except OSError as e:
+                        logger.warning("Could not remove temp dir %s: %s", temp_guild_dir, e)
+                del sink
+                await asyncio.to_thread(gc.collect)
+                logger.info(
+                    "Session finished for guild %s (%s), saved %d recording(s)",
+                    guild_id,
+                    guild_name,
+                    len(temp_files),
+                )
+
+
+    async with _whisper_jobs_slot_limiter():
+        await _run_transcription_pipeline()
 
 def create_bot() -> commands.Bot:
     """Create and configure the bot."""

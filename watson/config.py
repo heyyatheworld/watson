@@ -28,6 +28,16 @@ def _comma_role_ids(name: str) -> frozenset[int]:
     return frozenset(parts)
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return max(1, default)
+    try:
+        return max(1, int(str(raw).strip()))
+    except ValueError:
+        return max(1, default)
+
+
 @dataclass(frozen=True)
 class Settings:
     temp_dir: str
@@ -53,6 +63,7 @@ class Settings:
     lockdown_voice_commands: bool
     allowed_role_ids: frozenset[int]
     discord_hide_paths: bool
+    max_concurrent_transcriptions: int
 
     @property
     def max_recording_seconds(self) -> int:
@@ -95,6 +106,9 @@ def load_settings() -> Settings:
         lockdown_voice_commands=_truthy("WATSON_LOCKDOWN_VOICE_COMMANDS"),
         allowed_role_ids=_comma_role_ids("WATSON_ALLOWED_ROLE_IDS"),
         discord_hide_paths=_truthy("WATSON_DISCORD_HIDE_PATHS"),
+        max_concurrent_transcriptions=_positive_int_env(
+            "WATSON_MAX_CONCURRENT_TRANSCRIPTIONS", 1
+        ),
     )
 
 

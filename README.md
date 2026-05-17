@@ -68,6 +68,7 @@ Then use `!join`, `!record`, `!stop`, `!leave`, `!check` in a text channel (see 
    - `OLLAMA_HOST`, `OLLAMA_RECAP_MODEL`, `RECAP_PROMPT_FILE` (recap prompt path)
    - `WATSON_LOCKDOWN_VOICE_COMMANDS`, `WATSON_ALLOWED_ROLE_IDS` (restrict voice commands on public servers)
    - `WATSON_DISCORD_HIDE_PATHS` (show only filenames in Discord instead of relative paths)
+   - `WATSON_MAX_CONCURRENT_TRANSCRIPTIONS` (parallel Whisper pipelines across guilds; default `1`)
 
    Bot and invite: [Developer Portal](https://discord.com/developers/applications) → Bot → enable intents → OAuth2 URL Generator (scope **bot**, permissions: View Channels, Connect, Speak, Send Messages, Read Message History, Attach Files).
 
@@ -122,6 +123,7 @@ volumes:
 - **High memory** — Use `WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; prefer smaller Whisper models if needed.
 - **Voice works better over IPv4** — Some networks break Discord UDP over IPv6; set `WATSON_FORCE_IPV4=1` in `.env`.
 - **Slow transcription** — Use GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16` (and install CUDA deps).
+- **Heavy load from multiple guilds** — Default `WATSON_MAX_CONCURRENT_TRANSCRIPTIONS=1` serializes Whisper work across servers; increase only if CPU/GPU allows.
 - **No recap** — Ensure Ollama is running and `OLLAMA_RECAP_MODEL` is set; in Docker, `OLLAMA_HOST=http://ollama:11434` is set by compose.
 - **Bot doesn’t respond** — Enable **Message Content Intent** (and **Server Members Intent**) in the Developer Portal.
 - **"Error occurred while decoding opus frame"** — Usually a single bad voice packet; recording often continues. If it’s frequent, install libopus (e.g. `brew install opus` on macOS, `apt install libopus0` on Debian) and set `OPUS_LIB_PATH` in `.env` to the library path (see `.env.example`).
